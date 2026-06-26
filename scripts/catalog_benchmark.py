@@ -32,6 +32,8 @@ DEFAULT_SIZES = {
     "medium": 1_000_000,
     "large": 10_000_000,
 }
+TPCH_LINEITEM_ROWS_PER_SCALE_FACTOR = 6_001_215
+DEFAULT_SCALE_FACTORS = "0.01,0.1"
 
 SECRET_ENV_PATTERNS = (
     "TOKEN",
@@ -54,6 +56,7 @@ HTTP_DEBUG_RE = re.compile(
 class BenchmarkSize:
     label: str
     rows: int
+    scale_factor: float | None = None
 
 
 @dataclass(frozen=True)
@@ -70,12 +73,15 @@ class CatalogTarget:
     attach_as: str
     warehouse: str
     endpoint: str
+    endpoint_type: str | None
     default_schema: str
     authorization_type: str | None
     access_delegation_mode: str | None
     default_region: str | None
     create_schema: bool
     required_env: list[str]
+    table_location_root: str | None
+    aws_secret: dict[str, str]
     token_secret: dict[str, str]
     oauth_secret: dict[str, str]
     s3_secret: dict[str, str]
@@ -84,6 +90,10 @@ class CatalogTarget:
 ATTACH_VARIANTS = {
     "default": AttachVariant("default", {}),
     "no_stage_create": AttachVariant("no_stage_create", {"STAGE_CREATE_TABLES": "false"}),
+    "no_stage_no_purge": AttachVariant(
+        "no_stage_no_purge",
+        {"STAGE_CREATE_TABLES": "false", "PURGE_REQUESTED": "false"},
+    ),
     "no_multi_commit": AttachVariant("no_multi_commit", {"DISABLE_MULTI_TABLE_COMMIT": "true"}),
     "skip_create_metadata_updates": AttachVariant(
         "skip_create_metadata_updates",
@@ -174,13 +184,16 @@ def load_targets(env: dict[str, str] | None = None) -> dict[str, CatalogTarget]:
             default_variant=str(resolved.get("default_variant", "default")),
             attach_as=str(resolved["attach_as"]),
             warehouse=str(resolved["warehouse"]),
-            endpoint=str(resolved["endpoint"]),
+            endpoint=str(resolved.get("endpoint", "")),
+            endpoint_type=resolved.get("endpoint_type"),
             default_schema=str(resolved["default_schema"]),
             authorization_type=resolved.get("authorization_type"),
             access_delegation_mode=resolved.get("access_delegation_mode"),
             default_region=resolved.get("default_region"),
             create_schema=bool(resolved.get("create_schema", False)),
             required_env=list(values.get("required_env", [])),
+            table_location_root=resolved.get("table_location_root"),
+            aws_secret=dict(resolved.get("aws_secret", {})),
             token_secret=dict(resolved.get("token_secret", {})),
             oauth_secret=dict(resolved.get("oauth_secret", {})),
             s3_secret=dict(resolved.get("s3_secret", {})),
@@ -195,12 +208,15 @@ def load_targets(env: dict[str, str] | None = None) -> dict[str, CatalogTarget]:
                 attach_as=targets[name].attach_as,
                 warehouse=targets[name].warehouse,
                 endpoint=targets[name].endpoint,
+                endpoint_type=targets[name].endpoint_type,
                 default_schema=targets[name].default_schema,
                 authorization_type=targets[name].authorization_type,
                 access_delegation_mode=targets[name].access_delegation_mode,
                 default_region=targets[name].default_region,
                 create_schema=targets[name].create_schema,
                 required_env=targets[name].required_env,
+                table_location_root=targets[name].table_location_root,
+                aws_secret=targets[name].aws_secret,
                 token_secret=targets[name].token_secret,
                 oauth_secret=secret,
                 s3_secret=targets[name].s3_secret,
@@ -239,6 +255,37 @@ def parse_size_matrix(sizes: str | None, rows: str | None) -> list[BenchmarkSize
     return parsed
 
 
+def scale_factor_label(scale_factor: float) -> str:
+    return f"sf_{scale_factor:g}".replace(".", "_").replace("-", "m")
+
+
+def parse_scale_factor_matrix(scale_factors: str | None) -> list[BenchmarkSize]:
+    selected = scale_factors or DEFAULT_SCALE_FACTORS
+    parsed = []
+    for raw_scale_factor in selected.split(","):
+        raw_scale_factor = raw_scale_factor.strip()
+        if not raw_scale_factor:
+            continue
+        scale_factor = float(raw_scale_factor)
+        if scale_factor <= 0:
+            raise ValueError(f"scale factor must be positive: {raw_scale_factor}")
+        rows = round(TPCH_LINEITEM_ROWS_PER_SCALE_FACTOR * scale_factor)
+        parsed.append(BenchmarkSize(scale_factor_label(scale_factor), rows, scale_factor))
+    return parsed
+
+
+def parse_benchmark_matrix(
+    workload: str, sizes: str | None, rows: str | None, scale_factors: str | None
+) -> list[BenchmarkSize]:
+    if workload == "tpch-read":
+        if rows:
+            raise ValueError("--rows cannot be combined with --workload tpch-read")
+        return parse_scale_factor_matrix(scale_factors)
+    if scale_factors:
+        raise ValueError("--scale-factors requires --workload tpch-read")
+    return parse_size_matrix(sizes, rows)
+
+
 def sql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
@@ -246,7 +293,7 @@ def sql_literal(value: str) -> str:
 def option_sql(name: str, value: str | bool) -> str:
     if isinstance(value, bool):
         return f"  {name} {'true' if value else 'false'}"
-    if name in {"TYPE", "SECRET"}:
+    if name in {"TYPE", "SECRET", "PROVIDER"}:
         return f"  {name} {value}"
     if value in {"true", "false"}:
         return f"  {name} {value}"
@@ -255,6 +302,13 @@ def option_sql(name: str, value: str | bool) -> str:
 
 def render_secret_sql(target: CatalogTarget, env: dict[str, str]) -> str:
     statements = []
+    if target.aws_secret:
+        secret = target.aws_secret
+        options: list[tuple[str, str]] = [("TYPE", "S3"), ("PROVIDER", "credential_chain")]
+        if secret.get("region"):
+            options.append(("REGION", secret["region"]))
+        rendered_options = ", ".join(option_sql(name, value) for name, value in options)
+        statements.append(f"CREATE OR REPLACE SECRET {secret['name']} ({rendered_options});")
     if target.s3_secret:
         secret = target.s3_secret
         statements.append(
@@ -309,8 +363,11 @@ def secret_name(target: CatalogTarget) -> str | None:
 def render_attach_sql(target: CatalogTarget, env: dict[str, str], variant: AttachVariant) -> str:
     options: list[tuple[str, str | bool]] = [
         ("TYPE", "ICEBERG"),
-        ("ENDPOINT", target.endpoint),
     ]
+    if target.endpoint_type:
+        options.append(("ENDPOINT_TYPE", target.endpoint_type))
+    else:
+        options.append(("ENDPOINT", target.endpoint))
     target_secret = secret_name(target)
     if target_secret:
         options.append(("SECRET", target_secret))
@@ -318,7 +375,7 @@ def render_attach_sql(target: CatalogTarget, env: dict[str, str], variant: Attac
         options.append(("AUTHORIZATION_TYPE", target.authorization_type))
     if target.access_delegation_mode:
         options.append(("ACCESS_DELEGATION_MODE", target.access_delegation_mode))
-    if target.default_region:
+    if target.default_region and not target.endpoint_type:
         options.append(("DEFAULT_REGION", target.default_region))
     if target.default_schema:
         options.append(("DEFAULT_SCHEMA", target.default_schema))
@@ -328,15 +385,43 @@ def render_attach_sql(target: CatalogTarget, env: dict[str, str], variant: Attac
     return f"ATTACH {sql_literal(target.warehouse)} AS {target.attach_as} (\n{rendered_options}\n);"
 
 
-def relation_name(
-    target: CatalogTarget, variant_name: str, size: BenchmarkSize, repetition: int
-) -> str:
+def table_basename(variant_name: str, size: BenchmarkSize, repetition: int) -> str:
     table = f"bench_{variant_name}_{size.label}_r{repetition}".lower()
-    table = re.sub(r"[^a-z0-9_]", "_", table)
+    return re.sub(r"[^a-z0-9_]", "_", table)
+
+
+def relation_name(
+    target: CatalogTarget,
+    variant_name: str,
+    size: BenchmarkSize,
+    repetition: int,
+    suffix: str | None = None,
+) -> str:
+    table = table_basename(variant_name, size, repetition)
+    if suffix:
+        table = f"{table}_{suffix}"
     return f"{target.attach_as}.{target.default_schema}.{table}"
 
 
-def render_workload_sql(
+def create_table_sql(
+    target: CatalogTarget,
+    variant_name: str,
+    size: BenchmarkSize,
+    repetition: int,
+    relation: str,
+    columns: str,
+) -> str:
+    statement = f"CREATE TABLE {relation} ({columns})"
+    if target.table_location_root:
+        table_location = (
+            f"{target.table_location_root.rstrip('/')}/"
+            f"{table_basename(variant_name, size, repetition)}/"
+        )
+        statement += f"\nWITH ('location' = {sql_literal(table_location)})"
+    return statement + ";"
+
+
+def render_crud_workload_sql(
     target: CatalogTarget,
     variant_name: str,
     size: BenchmarkSize,
@@ -358,7 +443,14 @@ def render_workload_sql(
     lines.extend(
         [
             f".print >>> PHASE: create_table {size.label} rep {repetition}",
-            f"CREATE TABLE {relation} (id BIGINT, h BIGINT, label VARCHAR);",
+            create_table_sql(
+                target,
+                variant_name,
+                size,
+                repetition,
+                relation,
+                "id BIGINT, h BIGINT, label VARCHAR",
+            ),
             "",
             f".print >>> PHASE: insert {size.label} rep {repetition}",
             f"INSERT INTO {relation}",
@@ -402,6 +494,111 @@ def render_workload_sql(
     return "\n".join(lines)
 
 
+def render_tpch_read_workload_sql(
+    target: CatalogTarget,
+    variant_name: str,
+    size: BenchmarkSize,
+    repetition: int,
+    keep_tables: bool,
+) -> str:
+    if size.scale_factor is None:
+        raise ValueError("tpch-read workload requires a scale factor")
+
+    lineitem = relation_name(target, variant_name, size, repetition, "lineitem")
+    orders = relation_name(target, variant_name, size, repetition, "orders")
+    customer = relation_name(target, variant_name, size, repetition, "customer")
+    generated_tables = {
+        "lineitem": lineitem,
+        "orders": orders,
+        "customer": customer,
+    }
+    lines = []
+    if target.create_schema:
+        lines.extend(
+            [
+                ".print >>> PHASE: create_schema",
+                f"CREATE SCHEMA IF NOT EXISTS {target.attach_as}.{target.default_schema};",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            f".print >>> PHASE: tpch_generate {size.label} rep {repetition}",
+            "INSTALL tpch;",
+            "LOAD tpch;",
+            f"CALL dbgen(sf={size.scale_factor:g});",
+            "",
+            f".print >>> PHASE: tpch_load {size.label} rep {repetition}",
+        ]
+    )
+    for local_table, catalog_table in generated_tables.items():
+        lines.append(f"DROP TABLE IF EXISTS {catalog_table};")
+        lines.append(f"CREATE TABLE {catalog_table} AS SELECT * FROM {local_table};")
+    lines.extend(
+        [
+            "",
+            f".print >>> PHASE: tpch_q01 {size.label} rep {repetition}",
+            "SELECT",
+            "  l_returnflag,",
+            "  l_linestatus,",
+            "  sum(l_quantity) AS sum_qty,",
+            "  sum(l_extendedprice) AS sum_base_price,",
+            "  sum(l_extendedprice * (1 - l_discount)) AS sum_disc_price,",
+            "  count(*) AS count_order",
+            f"FROM {lineitem}",
+            "WHERE l_shipdate <= DATE '1998-09-02'",
+            "GROUP BY l_returnflag, l_linestatus",
+            "ORDER BY l_returnflag, l_linestatus;",
+            "",
+            f".print >>> PHASE: tpch_q03 {size.label} rep {repetition}",
+            "SELECT",
+            "  l_orderkey,",
+            "  sum(l_extendedprice * (1 - l_discount)) AS revenue,",
+            "  o_orderdate,",
+            "  o_shippriority",
+            f"FROM {customer}",
+            f"JOIN {orders} ON c_custkey = o_custkey",
+            f"JOIN {lineitem} ON l_orderkey = o_orderkey",
+            "WHERE c_mktsegment = 'BUILDING'",
+            "  AND o_orderdate < DATE '1995-03-15'",
+            "  AND l_shipdate > DATE '1995-03-15'",
+            "GROUP BY l_orderkey, o_orderdate, o_shippriority",
+            "ORDER BY revenue DESC, o_orderdate",
+            "LIMIT 10;",
+            "",
+            f".print >>> PHASE: tpch_q06 {size.label} rep {repetition}",
+            "SELECT sum(l_extendedprice * l_discount) AS revenue",
+            f"FROM {lineitem}",
+            "WHERE l_shipdate >= DATE '1994-01-01'",
+            "  AND l_shipdate < DATE '1995-01-01'",
+            "  AND l_discount BETWEEN 0.05 AND 0.07",
+            "  AND l_quantity < 24;",
+            "",
+        ]
+    )
+    if not keep_tables:
+        lines.append(f".print >>> PHASE: cleanup {size.label} rep {repetition}")
+        for catalog_table in generated_tables.values():
+            lines.append(f"DROP TABLE IF EXISTS {catalog_table};")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def render_workload_sql(
+    target: CatalogTarget,
+    variant_name: str,
+    size: BenchmarkSize,
+    repetition: int,
+    keep_tables: bool,
+    workload: str = "crud",
+) -> str:
+    if workload == "crud":
+        return render_crud_workload_sql(target, variant_name, size, repetition, keep_tables)
+    if workload == "tpch-read":
+        return render_tpch_read_workload_sql(target, variant_name, size, repetition, keep_tables)
+    raise ValueError(f"unknown workload: {workload}")
+
+
 def render_run_sql(
     target: CatalogTarget,
     env: dict[str, str],
@@ -412,14 +609,14 @@ def render_run_sql(
     threads: int,
     memory_limit: str,
     keep_tables: bool,
+    workload: str = "crud",
     profile: bool = False,
 ) -> tuple[str, Path]:
-    http_log_path = output_dir / f"http_{target.name}_{variant.name}_{size.label}_r{repetition}.csv"
+    stem = artifact_stem(target, variant, size, repetition, workload)
+    http_log_path = output_dir / f"http_{stem}.csv"
     profile_sql = ""
     if profile:
-        profile_path = (
-            output_dir / f"profile_{target.name}_{variant.name}_{size.label}_r{repetition}.json"
-        )
+        profile_path = output_dir / f"profile_{stem}.json"
         profile_sql = "\n".join(
             [
                 "PRAGMA enable_profiling='json';",
@@ -429,13 +626,30 @@ def render_run_sql(
     sql = RUN_TEMPLATE.read_text().format(
         threads=threads,
         memory_limit=memory_limit,
+        aws_load_sql="LOAD aws;" if target.aws_secret else "",
         profile_sql=profile_sql,
         secret_sql=render_secret_sql(target, env),
         attach_sql=render_attach_sql(target, env, variant),
-        workload_sql=render_workload_sql(target, variant.name, size, repetition, keep_tables),
+        workload_sql=render_workload_sql(
+            target, variant.name, size, repetition, keep_tables, workload
+        ),
         http_log_path=http_log_path,
     )
     return sql, http_log_path
+
+
+def artifact_stem(
+    target: CatalogTarget,
+    variant: AttachVariant,
+    size: BenchmarkSize,
+    repetition: int,
+    workload: str,
+) -> str:
+    stem = f"{target.name}_{variant.name}_{size.label}_r{repetition}"
+    if workload != "crud":
+        safe_workload = workload.replace("-", "_")
+        stem = f"{target.name}_{safe_workload}_{variant.name}_{size.label}_r{repetition}"
+    return stem
 
 
 def redact(text: str, env: dict[str, str]) -> str:
@@ -652,6 +866,7 @@ def run_one(
     threads: int,
     memory_limit: str,
     keep_tables: bool,
+    workload: str = "crud",
     profile: bool = False,
 ) -> dict[str, Any]:
     duckdb = duckdb_cli(env)
@@ -665,9 +880,10 @@ def run_one(
         threads,
         memory_limit,
         keep_tables,
+        workload,
         profile,
     )
-    stem = f"{target.name}_{variant.name}_{size.label}_r{repetition}"
+    stem = artifact_stem(target, variant, size, repetition, workload)
     sql_path = output_dir / f"{stem}.sql"
     output_path = output_dir / f"{stem}.out"
     http_debug_path = output_dir / f"http_debug_{stem}.jsonl"
@@ -691,9 +907,12 @@ def run_one(
     return {
         "target": target.name,
         "variant": variant.name,
+        "workload": workload,
         "size": size.label,
         "rows": size.rows,
+        "scale_factor": size.scale_factor,
         "repetition": repetition,
+        "artifact_stem": stem,
         "passed": result.returncode == 0,
         "exit_code": result.returncode,
         "error": "" if result.returncode == 0 else redacted_error(result.stdout, env),
@@ -728,6 +947,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--sizes", default="tiny,small", help="Comma-separated named sizes")
     parser.add_argument("--rows", help="Comma-separated explicit row counts; overrides --sizes")
+    parser.add_argument(
+        "--workload",
+        choices=["crud", "tpch-read"],
+        default="crud",
+        help="Benchmark workload to run after attach",
+    )
+    parser.add_argument(
+        "--scale-factors",
+        help="Comma-separated TPC-H scale factors for --workload tpch-read",
+    )
     parser.add_argument("--repetitions", type=int, default=1)
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--memory-limit", default="4GB")
@@ -766,6 +995,12 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"unknown target {args.target!r}; valid targets: {valid}")
 
     target = targets[args.target]
+    try:
+        benchmark_matrix = parse_benchmark_matrix(
+            args.workload, args.sizes, args.rows, args.scale_factors
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     missing = missing_env(target, env)
     if missing:
         raise SystemExit(f"missing required env vars for {target.name}: {', '.join(missing)}")
@@ -797,7 +1032,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"is not valid; valid variants: {', '.join(ATTACH_VARIANTS)}"
             )
         variant = ATTACH_VARIANTS[target.default_variant]
-        for size in parse_size_matrix(args.sizes, args.rows):
+        for size in benchmark_matrix:
             for repetition in range(1, args.repetitions + 1):
                 rows.append(
                     run_one(
@@ -810,6 +1045,7 @@ def main(argv: list[str] | None = None) -> int:
                         args.threads,
                         args.memory_limit,
                         args.keep_tables,
+                        args.workload,
                         args.profile,
                     )
                 )
@@ -830,13 +1066,14 @@ def main(argv: list[str] | None = None) -> int:
                 args.threads,
                 args.memory_limit,
                 args.keep_tables,
+                "crud",
                 args.profile,
             )
         )
 
     minimal = choose_minimal_passing(rows)
     if minimal is not None and not args.compat_only:
-        for size in parse_size_matrix(args.sizes, args.rows):
+        for size in benchmark_matrix:
             for repetition in range(1, args.repetitions + 1):
                 rows.append(
                     run_one(
@@ -849,6 +1086,7 @@ def main(argv: list[str] | None = None) -> int:
                         args.threads,
                         args.memory_limit,
                         args.keep_tables,
+                        args.workload,
                         args.profile,
                     )
                 )

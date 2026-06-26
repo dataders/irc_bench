@@ -38,11 +38,20 @@ class CatalogBenchmarkTest(unittest.TestCase):
             [("rows_7", 7), ("rows_42", 42)],
         )
 
+    def test_scale_factor_matrix_labels_and_estimates_lineitem_rows(self):
+        parsed = self.bench.parse_scale_factor_matrix("0.01,0.1,1")
+
+        self.assertEqual(
+            [(size.label, size.rows, size.scale_factor) for size in parsed],
+            [("sf_0_01", 60_012, 0.01), ("sf_0_1", 600_122, 0.1), ("sf_1", 6_001_215, 1.0)],
+        )
+
     def test_attach_variants_cover_horizon_ablation_cases(self):
         variants = self.bench.ATTACH_VARIANTS
         for name in [
             "default",
             "no_stage_create",
+            "no_stage_no_purge",
             "no_multi_commit",
             "skip_create_metadata_updates",
             "stage_multi_metadata",
@@ -103,6 +112,11 @@ class CatalogBenchmarkTest(unittest.TestCase):
                 "HORIZON_ACCESS_TOKEN": "token",
                 "HORIZON_SCHEMA": "AWS_CLOUD_COST",
                 "SNOWFLAKE_DEFAULT_REGION": "us-east-1",
+                "AWS_ACCESS_KEY_ID": "fake-aws-key",
+                "AWS_SECRET_ACCESS_KEY": "fake-aws-secret",
+                "AWS_GLUE_REST_ACCOUNT_ID": "123456789012",
+                "AWS_GLUE_REST_TABLE_LOCATION_ROOT": "s3://bucket/glue",
+                "AWS_S3_TABLES_BUCKET_ARN": "arn:aws:s3tables:us-west-2:123456789012:bucket/demo",
             }
         )
 
@@ -110,6 +124,8 @@ class CatalogBenchmarkTest(unittest.TestCase):
         self.assertEqual(targets["polaris_local"].default_variant, "default")
         self.assertEqual(targets["polaris_remote"].default_variant, "default")
         self.assertEqual(targets["horizon"].default_variant, "stage_multi_metadata")
+        self.assertEqual(targets["aws_glue"].default_variant, "no_stage_no_purge")
+        self.assertEqual(targets["aws_s3_tables"].default_variant, "no_stage_create")
         for target in targets.values():
             self.assertIn(target.default_variant, self.bench.ATTACH_VARIANTS)
 
@@ -137,6 +153,59 @@ class CatalogBenchmarkTest(unittest.TestCase):
         self.assertIn("SKIP_CREATE_TABLE_METADATA_UPDATES true", attach_sql)
         self.assertIn("REMOVE_FILES_ON_DELETE false", attach_sql)
 
+    def test_aws_targets_use_credential_chain_and_endpoint_type(self):
+        env = {
+            "AWS_ACCESS_KEY_ID": "fake-aws-key",
+            "AWS_SECRET_ACCESS_KEY": "fake-aws-secret",
+            "AWS_GLUE_REST_ACCOUNT_ID": "123456789012",
+            "AWS_GLUE_REST_REGION": "us-west-2",
+            "AWS_GLUE_REST_SCHEMA": "irc_duckdb_bench",
+            "AWS_GLUE_REST_TABLE_LOCATION_ROOT": "s3://bucket/glue",
+            "AWS_S3_TABLES_BUCKET_ARN": "arn:aws:s3tables:us-west-2:123456789012:bucket/demo",
+            "AWS_S3_TABLES_REGION": "us-west-2",
+        }
+        targets = self.bench.load_targets(env)
+
+        glue_secret_sql = self.bench.render_secret_sql(targets["aws_glue"], env)
+        glue_attach_sql = self.bench.render_attach_sql(
+            targets["aws_glue"], env, self.bench.ATTACH_VARIANTS["no_stage_no_purge"]
+        )
+        self.assertIn("CREATE OR REPLACE SECRET aws_sigv4", glue_secret_sql)
+        self.assertIn("PROVIDER credential_chain", glue_secret_sql)
+        self.assertIn("ATTACH '123456789012' AS aws_glue", glue_attach_sql)
+        self.assertIn("ENDPOINT_TYPE 'glue'", glue_attach_sql)
+        self.assertNotIn("AUTHORIZATION_TYPE", glue_attach_sql)
+        self.assertIn("STAGE_CREATE_TABLES false", glue_attach_sql)
+        self.assertIn("PURGE_REQUESTED false", glue_attach_sql)
+
+        s3_tables_attach_sql = self.bench.render_attach_sql(
+            targets["aws_s3_tables"], env, self.bench.ATTACH_VARIANTS["no_stage_create"]
+        )
+        self.assertIn(
+            "ATTACH 'arn:aws:s3tables:us-west-2:123456789012:bucket/demo' AS aws_s3_tables",
+            s3_tables_attach_sql,
+        )
+        self.assertIn("ENDPOINT_TYPE 's3_tables'", s3_tables_attach_sql)
+
+    def test_glue_workload_create_table_includes_location_property(self):
+        env = {
+            "AWS_ACCESS_KEY_ID": "fake-aws-key",
+            "AWS_SECRET_ACCESS_KEY": "fake-aws-secret",
+            "AWS_GLUE_REST_ACCOUNT_ID": "123456789012",
+            "AWS_GLUE_REST_TABLE_LOCATION_ROOT": "s3://bucket/glue",
+        }
+        target = self.bench.load_targets(env)["aws_glue"]
+        size = self.bench.BenchmarkSize("tiny", 4)
+        sql = self.bench.render_workload_sql(
+            target, "no_stage_create", size, repetition=1, keep_tables=False
+        )
+
+        self.assertIn("CREATE TABLE aws_glue.irc_duckdb_bench.bench_no_stage_create_tiny_r1", sql)
+        self.assertIn(
+            "WITH ('location' = 's3://bucket/glue/bench_no_stage_create_tiny_r1/')",
+            sql,
+        )
+
     def test_workload_sql_varies_table_name_and_row_count(self):
         target = self.bench.load_targets()["lakekeeper_local"]
         size = self.bench.BenchmarkSize("small", 10_000)
@@ -156,6 +225,36 @@ class CatalogBenchmarkTest(unittest.TestCase):
         self.assertIn(
             "DROP TABLE IF EXISTS lakekeeper.default.bench_legacy_full_compat_small_r2", sql
         )
+
+    def test_tpch_read_workload_materializes_tables_and_runs_read_queries(self):
+        target = self.bench.load_targets()["lakekeeper_local"]
+        size = self.bench.BenchmarkSize("sf_0_01", 60_012, scale_factor=0.01)
+        sql = self.bench.render_workload_sql(
+            target,
+            "default",
+            size,
+            repetition=1,
+            keep_tables=False,
+            workload="tpch-read",
+        )
+
+        self.assertIn("INSTALL tpch;", sql)
+        self.assertIn("LOAD tpch;", sql)
+        self.assertIn("CALL dbgen(sf=0.01);", sql)
+        self.assertIn(">>> PHASE: tpch_load sf_0_01 rep 1", sql)
+        self.assertIn(
+            "CREATE TABLE lakekeeper.default.bench_default_sf_0_01_r1_lineitem AS "
+            "SELECT * FROM lineitem;",
+            sql,
+        )
+        self.assertIn(">>> PHASE: tpch_q01 sf_0_01 rep 1", sql)
+        self.assertIn(">>> PHASE: tpch_q03 sf_0_01 rep 1", sql)
+        self.assertIn(">>> PHASE: tpch_q06 sf_0_01 rep 1", sql)
+        self.assertIn(
+            "DROP TABLE IF EXISTS lakekeeper.default.bench_default_sf_0_01_r1_lineitem;",
+            sql,
+        )
+        self.assertNotIn("DELETE FROM lakekeeper", sql)
 
     def test_run_sql_loads_required_extensions_after_disabling_autoload(self):
         env = {
@@ -177,6 +276,31 @@ class CatalogBenchmarkTest(unittest.TestCase):
 
         self.assertIn(
             "SET autoload_known_extensions=false;\nLOAD iceberg;\nLOAD httpfs;",
+            sql,
+        )
+        self.assertNotIn("LOAD aws;", sql)
+
+    def test_aws_run_sql_loads_aws_extension_after_disabling_autoload(self):
+        env = {
+            "AWS_ACCESS_KEY_ID": "fake-aws-key",
+            "AWS_SECRET_ACCESS_KEY": "fake-aws-secret",
+            "AWS_S3_TABLES_BUCKET_ARN": "arn:aws:s3tables:us-west-2:123456789012:bucket/demo",
+        }
+        target = self.bench.load_targets(env)["aws_s3_tables"]
+        sql, _ = self.bench.render_run_sql(
+            target=target,
+            env=env,
+            variant=self.bench.ATTACH_VARIANTS["no_stage_create"],
+            size=self.bench.BenchmarkSize("tiny", 4),
+            repetition=1,
+            output_dir=ROOT / ".tmp",
+            threads=4,
+            memory_limit="4GB",
+            keep_tables=False,
+        )
+
+        self.assertIn(
+            "SET autoload_known_extensions=false;\nLOAD iceberg;\nLOAD httpfs;\nLOAD aws;",
             sql,
         )
 
