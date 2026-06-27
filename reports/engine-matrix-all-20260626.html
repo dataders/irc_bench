@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Engine matrix combined report</title>
+  <style>
+    body {
+      margin: 24px;
+      color: #17202a;
+      background: #f7f8fb;
+      font: 14px/1.4 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", sans-serif;
+    }
+    main { max-width: 1280px; margin: 0 auto; }
+    h1, h2 { line-height: 1.15; }
+    code { background: #edf2f6; padding: 1px 4px; border-radius: 4px; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0 28px;
+      background: #fff;
+      box-shadow: 0 8px 20px rgba(24, 37, 56, 0.06);
+    }
+    th, td {
+      padding: 7px 9px;
+      border-bottom: 1px solid #d6dde6;
+      text-align: left;
+      white-space: nowrap;
+    }
+    th { background: #edf2f6; position: sticky; top: 0; z-index: 1; }
+    .table-wrap { overflow-x: auto; }
+    .note {
+      max-width: 920px;
+      padding: 10px 12px;
+      background: #fff7e6;
+      border: 1px solid #e3c16d;
+      border-radius: 6px;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Engine matrix combined report</h1>
+  <p>Rows: 48 benchmark result rows.</p>
+  <p>Parquet: <code>reports/engine-matrix-all-20260626.parquet</code></p>
+  <h2>Included run roots</h2>
+  <ul><li><code>.tmp/catalog_benchmarks/engine-matrix-20260626T2335Z</code></li>
+<li><code>.tmp/catalog_benchmarks/engine-matrix-large-20260626T233637Z</code></li>
+<li><code>.tmp/catalog_benchmarks/engine-matrix-medium-20260626T233151Z</code></li></ul>
+  <p class="note">DuckDB uses the existing CRUD workload, while PyIceberg and Spark
+  use create-write-read. The <code>operation_s</code> column excludes engine
+  startup/setup phases where possible, but DuckDB still includes delete and
+  read-after-delete work.</p>
+  <h2>Row counts by size</h2>
+  <div class="table-wrap">
+    <table><thead><tr><th>size</th><th>benchmark_rows</th></tr></thead><tbody><tr><td>large</td><td>12</td></tr>
+<tr><td>medium</td><td>12</td></tr>
+<tr><td>small</td><td>12</td></tr>
+<tr><td>tiny</td><td>12</td></tr></tbody></table>
+  </div>
+  <h2>Fastest operation by size and catalog</h2>
+  <div class="table-wrap">
+    <table><thead><tr><th>size</th><th>catalog</th><th>fastest</th><th>slowest</th><th>spread</th></tr></thead><tbody><tr><td>large</td><td>aws_glue</td><td>spark 30.975s</td><td>duckdb 41.912s</td><td>1.35x</td></tr>
+<tr><td>large</td><td>aws_s3_tables</td><td>pyiceberg 18.060s</td><td>duckdb 39.609s</td><td>2.19x</td></tr>
+<tr><td>large</td><td>horizon</td><td>pyiceberg 25.497s</td><td>duckdb 32.138s</td><td>1.26x</td></tr>
+<tr><td>large</td><td>polaris_remote</td><td>spark 8.437s</td><td>duckdb 20.061s</td><td>2.38x</td></tr>
+<tr><td>medium</td><td>aws_glue</td><td>spark 9.340s</td><td>pyiceberg 9.740s</td><td>1.04x</td></tr>
+<tr><td>medium</td><td>aws_s3_tables</td><td>pyiceberg 5.479s</td><td>spark 12.513s</td><td>2.28x</td></tr>
+<tr><td>medium</td><td>horizon</td><td>pyiceberg 12.693s</td><td>duckdb 24.979s</td><td>1.97x</td></tr>
+<tr><td>medium</td><td>polaris_remote</td><td>pyiceberg 2.794s</td><td>spark 6.160s</td><td>2.20x</td></tr>
+<tr><td>small</td><td>aws_glue</td><td>spark 5.474s</td><td>pyiceberg 7.950s</td><td>1.45x</td></tr>
+<tr><td>small</td><td>aws_s3_tables</td><td>pyiceberg 3.574s</td><td>duckdb 7.329s</td><td>2.05x</td></tr>
+<tr><td>small</td><td>horizon</td><td>spark 15.228s</td><td>duckdb 25.174s</td><td>1.65x</td></tr>
+<tr><td>small</td><td>polaris_remote</td><td>pyiceberg 1.564s</td><td>spark 2.945s</td><td>1.88x</td></tr>
+<tr><td>tiny</td><td>aws_glue</td><td>duckdb 6.286s</td><td>spark 9.034s</td><td>1.44x</td></tr>
+<tr><td>tiny</td><td>aws_s3_tables</td><td>pyiceberg 3.539s</td><td>spark 10.744s</td><td>3.04x</td></tr>
+<tr><td>tiny</td><td>horizon</td><td>spark 23.312s</td><td>duckdb 45.714s</td><td>1.96x</td></tr>
+<tr><td>tiny</td><td>polaris_remote</td><td>pyiceberg 1.777s</td><td>spark 5.270s</td><td>2.97x</td></tr></tbody></table>
+  </div>
+  <h2>All benchmark results</h2>
+  <div class="table-wrap">
+    <table><thead><tr><th>size</th><th>rows</th><th>catalog</th><th>engine</th><th>workload</th><th>variant</th><th>passed</th><th>total_s</th><th>operation_s</th><th>read_s</th><th>http_ms</th><th>requests</th></tr></thead><tbody><tr><td>tiny</td><td>4</td><td>aws_glue</td><td>duckdb</td><td>crud</td><td>no_stage_no_purge</td><td>yes</td><td>7.377s</td><td>6.286s</td><td>1.902s</td><td>7249</td><td>28</td></tr>
+<tr><td>tiny</td><td>4</td><td>aws_glue</td><td>pyiceberg</td><td>create-write-read</td><td>default</td><td>yes</td><td>7.946s</td><td>7.740s</td><td>1.302s</td><td>0</td><td>0</td></tr>
+<tr><td>tiny</td><td>4</td><td>aws_glue</td><td>spark</td><td>create-write-read</td><td>default</td><td>yes</td><td>15.142s</td><td>9.034s</td><td>1.741s</td><td>0</td><td>0</td></tr>
+<tr><td>tiny</td><td>4</td><td>aws_s3_tables</td><td>duckdb</td><td>crud</td><td>no_stage_create</td><td>yes</td><td>7.406s</td><td>6.415s</td><td>1.847s</td><td>7292</td><td>29</td></tr>
+<tr><td>tiny</td><td>4</td><td>aws_s3_tables</td><td>pyiceberg</td><td>create-write-read</td><td>default</td><td>yes</td><td>3.964s</td><td>3.539s</td><td>0.708s</td><td>0</td><td>0</td></tr>
+<tr><td>tiny</td><td>4</td><td>aws_s3_tables</td><td>spark</td><td>create-write-read</td><td>default</td><td>yes</td><td>14.550s</td><td>10.744s</td><td>1.727s</td><td>0</td><td>0</td></tr>
+<tr><td>tiny</td><td>4</td><td>horizon</td><td>duckdb</td><td>crud</td><td>stage_multi_metadata</td><td>yes</td><td>48.874s</td><td>45.714s</td><td>4.539s</td><td>48780</td><td>28</td></tr>
+<tr><td>tiny</td><td>4</td><td>horizon</td><td>pyiceberg</td><td>create-write-read</td><td>default</td><td>yes</td><td>30.113s</td><td>29.480s</td><td>3.958s</td><td>0</td><td>0</td></tr>
+<tr><td>tiny</td><td>4</td><td>horizon</td><td>spark</td><td>create-write-read</td><td>default</td><td>yes</td><td>28.211s</td><td>23.312s</td><td>1.400s</td><td>0</td><td>0</td></tr>
+<tr><td>tiny</td><td>4</td><td>polaris_remote</td><td>duckdb</td><td>crud</td><td>default</td><td>yes</td><td>2.873s</td><td>2.389s</td><td>0.657s</td><td>2723</td><td>30</td></tr>
+<tr><td>tiny</td><td>4</td><td>polaris_remote</td><td>pyiceberg</td><td>create-write-read</td><td>default</td><td>yes</td><td>2.043s</td><td>1.777s</td><td>0.292s</td><td>0</td><td>0</td></tr>
+<tr><td>tiny</td><td>4</td><td>polaris_remote</td><td>spark</td><td>create-write-read</td><td>default</td><td>yes</td><td>21.902s</td><td>5.270s</td><td>1.033s</td><td>0</td><td>0</td></tr>
+<tr><td>small</td><td>10000</td><td>aws_glue</td><td>duckdb</td><td>crud</td><td>no_stage_no_purge</td><td>yes</td><td>8.004s</td><td>7.094s</td><td>2.478s</td><td>7875</td><td>30</td></tr>
+<tr><td>small</td><td>10000</td><td>aws_glue</td><td>pyiceberg</td><td>create-write-read</td><td>default</td><td>yes</td><td>8.051s</td><td>7.950s</td><td>1.551s</td><td>0</td><td>0</td></tr>
+<tr><td>small</td><td>10000</td><td>aws_glue</td><td>spark</td><td>create-write-read</td><td>default</td><td>yes</td><td>7.647s</td><td>5.474s</td><td>1.279s</td><td>0</td><td>0</td></tr>
+<tr><td>small</td><td>10000</td><td>aws_s3_tables</td><td>duckdb</td><td>crud</td><td>no_stage_create</td><td>yes</td><td>8.304s</td><td>7.329s</td><td>2.339s</td><td>8190</td><td>31</td></tr>
+<tr><td>small</td><td>10000</td><td>aws_s3_tables</td><td>pyiceberg</td><td>create-write-read</td><td>default</td><td>yes</td><td>3.878s</td><td>3.574s</td><td>0.964s</td><td>0</td><td>0</td></tr>
+<tr><td>small</td><td>10000</td><td>aws_s3_tables</td><td>spark</td><td>create-write-read</td><td>default</td><td>yes</td><td>8.110s</td><td>6.122s</td><td>1.387s</td><td>0</td><td>0</td></tr>
+<tr><td>small</td><td>10000</td><td>horizon</td><td>duckdb</td><td>crud</td><td>stage_multi_metadata</td><td>yes</td><td>28.289s</td><td>25.174s</td><td>3.795s</td><td>28207</td><td>29</td></tr>
+<tr><td>small</td><td>10000</td><td>horizon</td><td>pyiceberg</td><td>create-write-read</td><td>default</td><td>yes</td><td>23.307s</td><td>22.367s</td><td>2.173s</td><td>0</td><td>0</td></tr>
+<tr><td>small</td><td>10000</td><td>horizon</td><td>spark</td><td>create-write-read</td><td>default</td><td>yes</td><td>18.728s</td><td>15.228s</td><td>0.690s</td><td>0</td><td>0</td></tr>
+<tr><td>small</td><td>10000</td><td>polaris_remote</td><td>duckdb</td><td>crud</td><td>default</td><td>yes</td><td>2.903s</td><td>2.407s</td><td>0.713s</td><td>2820</td><td>32</td></tr>
+<tr><td>small</td><td>10000</td><td>polaris_remote</td><td>pyiceberg</td><td>create-write-read</td><td>default</td><td>yes</td><td>1.716s</td><td>1.564s</td><td>0.441s</td><td>0</td><td>0</td></tr>
+<tr><td>small</td><td>10000</td><td>polaris_remote</td><td>spark</td><td>create-write-read</td><td>default</td><td>yes</td><td>6.384s</td><td>2.945s</td><td>0.448s</td><td>0</td><td>0</td></tr>
+<tr><td>medium</td><td>1000000</td><td>aws_glue</td><td>duckdb</td><td>crud</td><td>no_stage_no_purge</td><td>yes</td><td>10.729s</td><td>9.672s</td><td>3.648s</td><td>11988</td><td>41</td></tr>
+<tr><td>medium</td><td>1000000</td><td>aws_glue</td><td>pyiceberg</td><td>create-write-read</td><td>default</td><td>yes</td><td>9.893s</td><td>9.740s</td><td>2.388s</td><td>0</td><td>0</td></tr>
+<tr><td>medium</td><td>1000000</td><td>aws_glue</td><td>spark</td><td>create-write-read</td><td>default</td><td>yes</td><td>12.165s</td><td>9.340s</td><td>2.293s</td><td>0</td><td>0</td></tr>
+<tr><td>medium</td><td>1000000</td><td>aws_s3_tables</td><td>duckdb</td><td>crud</td><td>no_stage_create</td><td>yes</td><td>10.725s</td><td>9.702s</td><td>3.630s</td><td>12195</td><td>42</td></tr>
+<tr><td>medium</td><td>1000000</td><td>aws_s3_tables</td><td>pyiceberg</td><td>create-write-read</td><td>default</td><td>yes</td><td>5.913s</td><td>5.479s</td><td>1.611s</td><td>0</td><td>0</td></tr>
+<tr><td>medium</td><td>1000000</td><td>aws_s3_tables</td><td>spark</td><td>create-write-read</td><td>default</td><td>yes</td><td>15.354s</td><td>12.513s</td><td>2.374s</td><td>0</td><td>0</td></tr>
+<tr><td>medium</td><td>1000000</td><td>horizon</td><td>duckdb</td><td>crud</td><td>stage_multi_metadata</td><td>yes</td><td>27.299s</td><td>24.979s</td><td>3.145s</td><td>27375</td><td>41</td></tr>
+<tr><td>medium</td><td>1000000</td><td>horizon</td><td>pyiceberg</td><td>create-write-read</td><td>default</td><td>yes</td><td>13.281s</td><td>12.693s</td><td>1.681s</td><td>0</td><td>0</td></tr>
+<tr><td>medium</td><td>1000000</td><td>horizon</td><td>spark</td><td>create-write-read</td><td>default</td><td>yes</td><td>22.459s</td><td>19.453s</td><td>2.174s</td><td>0</td><td>0</td></tr>
+<tr><td>medium</td><td>1000000</td><td>polaris_remote</td><td>duckdb</td><td>crud</td><td>default</td><td>yes</td><td>4.637s</td><td>4.146s</td><td>1.247s</td><td>4635</td><td>43</td></tr>
+<tr><td>medium</td><td>1000000</td><td>polaris_remote</td><td>pyiceberg</td><td>create-write-read</td><td>default</td><td>yes</td><td>3.049s</td><td>2.794s</td><td>0.790s</td><td>0</td><td>0</td></tr>
+<tr><td>medium</td><td>1000000</td><td>polaris_remote</td><td>spark</td><td>create-write-read</td><td>default</td><td>yes</td><td>9.909s</td><td>6.160s</td><td>0.909s</td><td>0</td><td>0</td></tr>
+<tr><td>large</td><td>10000000</td><td>aws_glue</td><td>duckdb</td><td>crud</td><td>no_stage_no_purge</td><td>yes</td><td>43.101s</td><td>41.912s</td><td>20.936s</td><td>54006</td><td>164</td></tr>
+<tr><td>large</td><td>10000000</td><td>aws_glue</td><td>pyiceberg</td><td>create-write-read</td><td>default</td><td>yes</td><td>33.815s</td><td>33.659s</td><td>10.319s</td><td>0</td><td>0</td></tr>
+<tr><td>large</td><td>10000000</td><td>aws_glue</td><td>spark</td><td>create-write-read</td><td>default</td><td>yes</td><td>45.450s</td><td>30.975s</td><td>3.290s</td><td>0</td><td>0</td></tr>
+<tr><td>large</td><td>10000000</td><td>aws_s3_tables</td><td>duckdb</td><td>crud</td><td>no_stage_create</td><td>yes</td><td>40.985s</td><td>39.609s</td><td>16.925s</td><td>52770</td><td>165</td></tr>
+<tr><td>large</td><td>10000000</td><td>aws_s3_tables</td><td>pyiceberg</td><td>create-write-read</td><td>default</td><td>yes</td><td>18.469s</td><td>18.060s</td><td>5.828s</td><td>0</td><td>0</td></tr>
+<tr><td>large</td><td>10000000</td><td>aws_s3_tables</td><td>spark</td><td>create-write-read</td><td>default</td><td>yes</td><td>40.157s</td><td>24.156s</td><td>3.019s</td><td>0</td><td>0</td></tr>
+<tr><td>large</td><td>10000000</td><td>horizon</td><td>duckdb</td><td>crud</td><td>stage_multi_metadata</td><td>yes</td><td>35.068s</td><td>32.138s</td><td>7.498s</td><td>35527</td><td>163</td></tr>
+<tr><td>large</td><td>10000000</td><td>horizon</td><td>pyiceberg</td><td>create-write-read</td><td>default</td><td>yes</td><td>26.193s</td><td>25.497s</td><td>3.493s</td><td>0</td><td>0</td></tr>
+<tr><td>large</td><td>10000000</td><td>horizon</td><td>spark</td><td>create-write-read</td><td>default</td><td>yes</td><td>35.186s</td><td>31.530s</td><td>2.555s</td><td>0</td><td>0</td></tr>
+<tr><td>large</td><td>10000000</td><td>polaris_remote</td><td>duckdb</td><td>crud</td><td>default</td><td>yes</td><td>20.608s</td><td>20.061s</td><td>8.364s</td><td>22419</td><td>166</td></tr>
+<tr><td>large</td><td>10000000</td><td>polaris_remote</td><td>pyiceberg</td><td>create-write-read</td><td>default</td><td>yes</td><td>10.705s</td><td>10.439s</td><td>2.749s</td><td>0</td><td>0</td></tr>
+<tr><td>large</td><td>10000000</td><td>polaris_remote</td><td>spark</td><td>create-write-read</td><td>default</td><td>yes</td><td>13.388s</td><td>8.437s</td><td>1.158s</td><td>0</td><td>0</td></tr></tbody></table>
+  </div>
+</main>
+</body>
+</html>

@@ -22,7 +22,19 @@ WORKLOAD_PHASES = (
     "readback",
     "delete",
     "read_after_delete",
+    "tpch_generate",
+    "tpch_load",
+    "tpch_q01",
+    "tpch_q03",
+    "tpch_q06",
     "cleanup",
+)
+READ_PHASES = (
+    "readback",
+    "read_after_delete",
+    "tpch_q01",
+    "tpch_q03",
+    "tpch_q06",
 )
 SUPPORT_PHASES = (
     "startup",
@@ -117,7 +129,9 @@ def summarize_http_phase_groups(raw_groups: dict[str, Any]) -> dict[str, dict[st
 
 def run_key(row: dict[str, Any]) -> str:
     return (
-        f"{row.get('target', 'unknown')}:{row.get('variant', 'unknown')}:"
+        f"{row.get('engine', 'duckdb')}:{row.get('target', 'unknown')}:"
+        f"{row.get('workload', 'crud')}:"
+        f"{row.get('variant', 'unknown')}:"
         f"{row.get('size', 'unknown')}:r{row.get('repetition', 'unknown')}"
     )
 
@@ -130,13 +144,17 @@ def enrich_row(row: dict[str, Any], target_dir: Path, output_path: Path) -> dict
     variant = str(enriched.get("variant", "default"))
     size = str(enriched.get("size", "unknown"))
     repetition = enriched.get("repetition", "unknown")
-    base_name = f"{target}_{variant}_{size}_r{repetition}"
+    base_name = str(enriched.get("artifact_stem") or f"{target}_{variant}_{size}_r{repetition}")
 
+    enriched["engine"] = str(enriched.get("engine", "duckdb"))
     enriched["run_key"] = key
+    enriched["workload"] = str(enriched.get("workload", "crud"))
+    enriched["variant"] = variant
     enriched["target_label"] = TARGET_LABELS.get(target, target)
     enriched["phase_timings"] = summarize_phase_timings(timings)
     enriched["total_wall_s"] = round(sum_timings(timings), 6)
     enriched["workload_wall_s"] = round(sum_timings(timings, WORKLOAD_PHASES), 6)
+    enriched["read_wall_s"] = round(sum_timings(timings, READ_PHASES), 6)
     enriched["support_wall_s"] = round(sum_timings(timings, SUPPORT_PHASES), 6)
     enriched["http_phase_groups"] = summarize_http_phase_groups(
         dict(enriched.get("http_phase_groups", {}))
@@ -185,8 +203,10 @@ def load_http_events(
             events.append(
                 {
                     "run_key": row["run_key"],
+                    "engine": row.get("engine", "duckdb"),
                     "target": row["target"],
                     "target_label": row["target_label"],
+                    "workload": row.get("workload", "crud"),
                     "variant": row.get("variant", ""),
                     "size": row.get("size", ""),
                     "repetition": row.get("repetition", ""),
@@ -212,10 +232,12 @@ def load_artifacts(run_root: Path, output_path: Path) -> list[dict[str, Any]]:
         if not path.is_file():
             continue
         relative = path.relative_to(run_root).as_posix()
+        parts = Path(relative).parts
         artifacts.append(
             {
                 "path": relative,
-                "target": path.parent.name if path.parent != run_root else "",
+                "target": parts[0] if parts else "",
+                "engine": parts[1] if len(parts) > 2 else "",
                 "kind": path.suffix.lstrip(".") or path.name,
                 "bytes": path.stat().st_size,
                 "size_label": file_size_label(path.stat().st_size),
@@ -241,7 +263,7 @@ def load_artifacts(run_root: Path, output_path: Path) -> list[dict[str, Any]]:
 def build_dashboard_data(run_root: Path, output_path: Path) -> dict[str, Any]:
     rows = []
     events = []
-    for summary_path in sorted(run_root.glob("*/summary.json")):
+    for summary_path in sorted(run_root.rglob("summary.json")):
         target_dir = summary_path.parent
         for raw_row in json.loads(summary_path.read_text()):
             row = enrich_row(raw_row, target_dir, output_path)
@@ -252,8 +274,10 @@ def build_dashboard_data(run_root: Path, output_path: Path) -> dict[str, Any]:
         raise SystemExit(f"no summary rows found under {run_root}")
 
     targets = sorted({str(row["target"]) for row in rows})
+    engines = sorted({str(row.get("engine", "duckdb")) for row in rows})
     sizes = sorted({str(row["size"]) for row in rows})
     variants = sorted({str(row["variant"]) for row in rows})
+    workloads = sorted({str(row.get("workload", "crud")) for row in rows})
     http_groups = sorted({str(event["url_group"]) for event in events})
 
     return {
@@ -266,11 +290,14 @@ def build_dashboard_data(run_root: Path, output_path: Path) -> dict[str, Any]:
         "events": events,
         "artifacts": load_artifacts(run_root, output_path),
         "targets": targets,
+        "engines": engines,
         "sizes": sizes,
         "variants": variants,
+        "workloads": workloads,
         "http_groups": http_groups,
         "phase_order": list(PHASE_ORDER),
         "workload_phases": list(WORKLOAD_PHASES),
+        "read_phases": list(READ_PHASES),
         "support_phases": list(SUPPORT_PHASES),
         "target_labels": TARGET_LABELS,
         "http_group_labels": HTTP_GROUP_LABELS,
@@ -335,7 +362,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     }
     .toolbar {
       display: grid;
-      grid-template-columns: repeat(6, minmax(130px, 1fr));
+      grid-template-columns: repeat(7, minmax(120px, 1fr));
       gap: 10px;
       margin-top: 14px;
       align-items: end;
@@ -424,7 +451,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     .stats {
       display: grid;
       gap: 10px;
-      grid-template-columns: repeat(5, minmax(130px, 1fr));
+      grid-template-columns: repeat(6, minmax(120px, 1fr));
     }
     .stat, .panel {
       background: var(--surface);
@@ -628,7 +655,9 @@ HTML_TEMPLATE = r"""<!doctype html>
           <div class="multi-picker-menu" id="targetPickerMenu"></div>
         </div>
       </div>
+      <label>Engine<select id="engineFilter"></select></label>
       <label>Size<select id="sizeFilter"></select></label>
+      <label>Workload<select id="workloadFilter"></select></label>
       <label>Phase<select id="phaseFilter"></select></label>
       <label>HTTP group<select id="groupFilter"></select></label>
       <label>Compare metric<select id="metricFilter"></select></label>
@@ -637,6 +666,14 @@ HTML_TEMPLATE = r"""<!doctype html>
   </header>
   <main>
     <section class="stats" id="stats"></section>
+
+    <section class="panel">
+      <header><h2>Performance By Table Size</h2></header>
+      <div class="body">
+        <div id="scaleLineChart" class="chart"></div>
+        <div id="scaleLineLegend" class="legend-wrap"></div>
+      </div>
+    </section>
 
     <section class="grid-2">
       <article class="panel">
@@ -740,16 +777,22 @@ HTML_TEMPLATE = r"""<!doctype html>
       readback: "#4f6f52",
       delete: "#7b5aa6",
       read_after_delete: "#bf8a1c",
+      tpch_generate: "#8b6f47",
+      tpch_load: "#5c78c7",
+      tpch_q01: "#2f9c7a",
+      tpch_q03: "#9b4d5f",
+      tpch_q06: "#3d8796",
       cleanup: "#63758a"
     };
     const attributionParts = [
       ["catalog_ms", "Catalog REST", "#1c7c8c"],
       ["object_ms", "Object store", "#b6572a"],
       ["other_http_ms", "Other HTTP", "#7b5aa6"],
-      ["local_ms", "DuckDB/local", "#4f6f52"]
+      ["local_ms", "Engine/local", "#4f6f52"]
     ];
     const metricOptions = [
       ["workload_wall_s", "Workload wall"],
+      ["read_wall_s", "Read wall"],
       ["total_wall_s", "Total wall"],
       ["http_duration_ms", "HTTP duration"],
       ["http_request_count", "HTTP requests"]
@@ -757,15 +800,26 @@ HTML_TEMPLATE = r"""<!doctype html>
 
     const state = {
       targets: [...dashboard.targets],
+      engine: "all",
       size: "all",
+      workload: "all",
       phase: "all",
       group: "all",
-      metric: "workload_wall_s",
+      metric: "read_wall_s",
       query: ""
     };
 
     function labelTarget(target) {
       return dashboard.target_labels[target] || target;
+    }
+
+    function labelEngine(engine) {
+      const labels = { duckdb: "DuckDB", pyiceberg: "PyIceberg", spark: "Spark" };
+      return labels[engine] || engine;
+    }
+
+    function labelEngineTarget(engine, target) {
+      return `${labelEngine(engine)} / ${labelTarget(target)}`;
     }
 
     function labelGroup(group) {
@@ -853,7 +907,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     function matchesQuery(row, query) {
       if (!query) return true;
       const haystack = [
-        row.run_key, row.target, row.target_label, row.variant, row.size, row.status,
+        row.run_key, row.engine, row.target, row.target_label, row.workload, row.variant, row.size, row.status,
         row.method, row.url_group, row.host, row.path, row.phase, row.normalized_phase
       ].join(" ").toLowerCase();
       return haystack.includes(query);
@@ -863,7 +917,9 @@ HTML_TEMPLATE = r"""<!doctype html>
       const query = state.query.trim().toLowerCase();
       return dashboard.rows.filter(row => {
         if (!targetIsSelected(row.target)) return false;
+        if (state.engine !== "all" && String(row.engine || "duckdb") !== state.engine) return false;
         if (state.size !== "all" && String(row.size) !== state.size) return false;
+        if (state.workload !== "all" && String(row.workload || "crud") !== state.workload) return false;
         if (state.phase !== "all" && !row.phase_timings[state.phase]) return false;
         if (state.group !== "all" && !(row.http_groups || {})[state.group]) return false;
         return matchesQuery(row, query);
@@ -874,7 +930,9 @@ HTML_TEMPLATE = r"""<!doctype html>
       const query = state.query.trim().toLowerCase();
       return dashboard.events.filter(event => {
         if (!targetIsSelected(event.target)) return false;
+        if (state.engine !== "all" && String(event.engine || "duckdb") !== state.engine) return false;
         if (state.size !== "all" && String(event.size) !== state.size) return false;
+        if (state.workload !== "all" && String(event.workload || "crud") !== state.workload) return false;
         if (state.phase !== "all" && event.normalized_phase !== state.phase) return false;
         if (state.group !== "all" && event.url_group !== state.group) return false;
         return matchesQuery(event, query);
@@ -914,7 +972,10 @@ HTML_TEMPLATE = r"""<!doctype html>
 
     function populateControls() {
       populateTargetPicker();
+      populateSelect("engineFilter", [["all", "All engines"], ...(dashboard.engines || ["duckdb"]).map(e => [e, labelEngine(e)])], state.engine);
       populateSelect("sizeFilter", [["all", "All sizes"], ...dashboard.sizes.map(s => [s, s])], state.size);
+      const workloads = dashboard.workloads || ["crud"];
+      populateSelect("workloadFilter", [["all", "All workloads"], ...workloads.map(w => [w, w])], state.workload);
       const phases = dashboard.phase_order.filter(phase => dashboard.rows.some(row => row.phase_timings[phase]) || dashboard.events.some(event => event.normalized_phase === phase));
       populateSelect("phaseFilter", [["all", "All phases"], ...phases.map(p => [p, labelPhase(p)])], state.phase);
       populateSelect("groupFilter", [["all", "All HTTP groups"], ...dashboard.http_groups.map(g => [g, labelGroup(g)])], state.group);
@@ -924,7 +985,9 @@ HTML_TEMPLATE = r"""<!doctype html>
 
     function bindControls() {
       for (const [id, key] of [
+        ["engineFilter", "engine"],
         ["sizeFilter", "size"],
+        ["workloadFilter", "workload"],
         ["phaseFilter", "phase"],
         ["groupFilter", "group"],
         ["metricFilter", "metric"]
@@ -963,24 +1026,26 @@ HTML_TEMPLATE = r"""<!doctype html>
 
     function renderStats(rows, events) {
       const passed = rows.filter(row => row.passed).length;
-      const targetGroups = groupBy(rows, row => row.target);
+      const targetGroups = groupBy(rows, row => `${row.engine || "duckdb"}|${row.target}`);
       let slowest = "";
       let slowestValue = -Infinity;
-      for (const [target, targetRows] of targetGroups) {
+      for (const [key, targetRows] of targetGroups) {
         const value = median(targetRows.map(row => Number(row.workload_wall_s)));
         if (value > slowestValue) {
-          slowest = target;
+          slowest = key;
           slowestValue = value;
         }
       }
+      const [slowestEngine, slowestTarget] = slowest ? slowest.split("|") : ["", ""];
       const totalRequests = sum(events.map(event => Number(event.duration_ms) >= 0 ? 1 : 0));
       const totalHttpMs = sum(events.map(event => Number(event.duration_ms)));
       const cards = [
         ["Runs", fmtNumber(rows.length), `${passed}/${rows.length} passed`],
         ["Median workload", fmtSeconds(median(rows.map(row => Number(row.workload_wall_s)))), "create through cleanup"],
+        ["Median read", fmtSeconds(median(rows.map(row => Number(row.read_wall_s || 0)))), "read phases only"],
         ["Median HTTP", fmtMs(median(rows.map(row => Number(row.http_duration_ms)))), "summed request durations"],
         ["HTTP requests", fmtNumber(totalRequests), fmtMs(totalHttpMs)],
-        ["Slowest catalog", slowest ? labelTarget(slowest) : "", slowest ? fmtSeconds(slowestValue) : ""]
+        ["Slowest engine/catalog", slowest ? labelEngineTarget(slowestEngine, slowestTarget) : "", slowest ? fmtSeconds(slowestValue) : ""]
       ];
       document.getElementById("stats").innerHTML = cards.map(([label, value, note]) => `
         <div class="stat">
@@ -1016,24 +1081,136 @@ HTML_TEMPLATE = r"""<!doctype html>
     }
 
     function renderComparison(rows) {
-      const groups = [...groupBy(rows, row => `${row.target}|${row.size}`).entries()];
+      const groups = [...groupBy(rows, row => `${row.engine || "duckdb"}|${row.target}|${row.size}`).entries()];
       const items = groups.map(([key, groupRows], index) => {
-        const [target, size] = key.split("|");
+        const [engine, target, size] = key.split("|");
         const value = median(groupRows.map(row => Number(row[state.metric])));
         return {
-          label: `${labelTarget(target)} / ${size}`,
+          label: `${labelEngineTarget(engine, target)} / ${size}`,
           value,
           valueLabel: fmtMetric(value, state.metric),
           color: colors[index % colors.length],
+          engine,
           target
         };
       }).sort((a, b) => b.value - a.value);
       document.getElementById("comparisonChart").innerHTML = items.length
         ? barSvg(items, { labelWidth: 245 })
         : "<div class=\"caption\">No rows match current filters.</div>";
-      renderLegend("comparisonLegend", [...new Set(items.map(item => item.target))].map((target, index) => ({
-        label: labelTarget(target),
-        color: colors[index % colors.length]
+      renderLegend("comparisonLegend", [...new Map(items.map(item => [`${item.engine}|${item.target}`, item])).values()].map(item => ({
+        label: labelEngineTarget(item.engine, item.target),
+        color: item.color
+      })));
+    }
+
+    function renderScaleLineChart(rows) {
+      const grouped = [...groupBy(rows, row => `${row.engine || "duckdb"}|${row.target}`).entries()]
+        .map(([key, targetRows], targetIndex) => {
+          const [engine, target] = key.split("|");
+          const points = [...groupBy(targetRows, row => Number(row.rows)).entries()]
+            .map(([rowCount, rowGroup]) => ({
+              rows: Number(rowCount),
+              size: rowGroup[0].size,
+              value: median(rowGroup.map(row => Number(row[state.metric]))),
+              label: `${rowGroup[0].size} / ${fmtNumber(Number(rowCount))} rows`
+            }))
+            .filter(point => Number.isFinite(point.rows) && Number.isFinite(point.value))
+            .sort((a, b) => a.rows - b.rows);
+          return {
+            engine,
+            target,
+            target_label: labelEngineTarget(engine, target),
+            color: colors[targetIndex % colors.length],
+            points
+          };
+        })
+        .filter(series => series.points.length);
+
+      const allPoints = grouped.flatMap(series => series.points);
+      if (!allPoints.length) {
+        document.getElementById("scaleLineChart").innerHTML = "<div class=\"caption\">No rows match current filters.</div>";
+        renderLegend("scaleLineLegend", []);
+        return;
+      }
+
+      const width = 960;
+      const height = 330;
+      const left = 76;
+      const right = 170;
+      const top = 24;
+      const bottom = 62;
+      const chartWidth = width - left - right;
+      const chartHeight = height - top - bottom;
+      const rowValues = allPoints.map(point => point.rows);
+      const valueMax = Math.max(...allPoints.map(point => point.value), 0);
+      const minRows = Math.min(...rowValues);
+      const maxRows = Math.max(...rowValues);
+      const logMin = Math.log10(Math.max(1, minRows));
+      const logMax = Math.log10(Math.max(1, maxRows));
+      const xFor = rowsValue => {
+        if (logMax === logMin) return left + chartWidth / 2;
+        return left + ((Math.log10(Math.max(1, rowsValue)) - logMin) / (logMax - logMin)) * chartWidth;
+      };
+      const yFor = value => top + chartHeight - (valueMax > 0 ? (value / valueMax) * chartHeight : 0);
+      const uniqueRows = [...new Set(rowValues)].sort((a, b) => a - b);
+      const xTicks = uniqueRows.map(rowCount => {
+        const x = xFor(rowCount);
+        return `
+          <g>
+            <line x1="${x}" y1="${top}" x2="${x}" y2="${top + chartHeight}" stroke="#e5eaf0"></line>
+            <text x="${x}" y="${top + chartHeight + 20}" text-anchor="middle" class="tick">${escapeHtml(fmtNumber(rowCount))}</text>
+          </g>
+        `;
+      }).join("");
+      const yTicks = [0, 0.25, 0.5, 0.75, 1].map(ratio => {
+        const value = valueMax * ratio;
+        const y = yFor(value);
+        return `
+          <g>
+            <line x1="${left}" y1="${y}" x2="${left + chartWidth}" y2="${y}" stroke="#e5eaf0"></line>
+            <text x="${left - 10}" y="${y + 4}" text-anchor="end" class="tick">${escapeHtml(fmtMetric(value, state.metric))}</text>
+          </g>
+        `;
+      }).join("");
+      const lines = grouped.map(series => {
+        const path = series.points.map((point, index) => {
+          const prefix = index === 0 ? "M" : "L";
+          return `${prefix}${xFor(point.rows).toFixed(2)},${yFor(point.value).toFixed(2)}`;
+        }).join(" ");
+        const dots = series.points.map(point => {
+          const x = xFor(point.rows);
+          const y = yFor(point.value);
+          return `
+            <g>
+              <circle cx="${x}" cy="${y}" r="4" fill="${series.color}"></circle>
+              <title>${escapeHtml(series.target_label)} ${escapeHtml(point.label)}: ${escapeHtml(fmtMetric(point.value, state.metric))}</title>
+            </g>
+          `;
+        }).join("");
+        const last = series.points[series.points.length - 1];
+        return `
+          <g>
+            <path d="${path}" fill="none" stroke="${series.color}" stroke-width="2.5"></path>
+            ${dots}
+            <text x="${xFor(last.rows) + 8}" y="${yFor(last.value) + 4}" class="caption">${escapeHtml(series.target_label)}</text>
+          </g>
+        `;
+      }).join("");
+
+      document.getElementById("scaleLineChart").innerHTML = `
+        <svg viewBox="0 0 ${width} ${height}" role="img">
+          ${xTicks}
+          ${yTicks}
+          <line x1="${left}" y1="${top + chartHeight}" x2="${left + chartWidth}" y2="${top + chartHeight}" stroke="#9aa8b7"></line>
+          <line x1="${left}" y1="${top}" x2="${left}" y2="${top + chartHeight}" stroke="#9aa8b7"></line>
+          ${lines}
+          <text x="${left + chartWidth / 2}" y="${height - 18}" text-anchor="middle" class="axis">Rows, log scale</text>
+          <text x="16" y="${top + chartHeight / 2}" transform="rotate(-90 16 ${top + chartHeight / 2})" text-anchor="middle" class="axis">${escapeHtml(metricOptions.find(([value]) => value === state.metric)?.[1] || state.metric)}</text>
+        </svg>
+      `;
+      renderLegend("scaleLineLegend", grouped.map(series => ({
+        label: series.target_label,
+        color: series.color
       })));
     }
 
@@ -1045,14 +1222,21 @@ HTML_TEMPLATE = r"""<!doctype html>
 
     function renderPhaseChart(rows) {
       const phases = dashboard.workload_phases;
-      const groups = [...groupBy(rows, row => `${row.target}|${row.size}`).entries()]
+      const groups = [...groupBy(rows, row => `${row.engine || "duckdb"}|${row.target}|${row.size}`).entries()]
         .map(([key, groupRows]) => {
-          const [target, size] = key.split("|");
+          const [engine, target, size] = key.split("|");
           const values = {};
           for (const phase of phases) {
             values[phase] = median(groupRows.map(row => Number(row.phase_timings[phase] || 0)));
           }
-          return { target, size, label: `${labelTarget(target)} / ${size}`, values, total: sum(Object.values(values)) };
+          return {
+            engine,
+            target,
+            size,
+            label: `${labelEngineTarget(engine, target)} / ${size}`,
+            values,
+            total: sum(Object.values(values))
+          };
         })
         .sort((a, b) => b.total - a.total);
 
@@ -1124,8 +1308,9 @@ HTML_TEMPLATE = r"""<!doctype html>
       const httpMs = catalogMs + objectMs + otherHttpMs;
       return {
         run_key: row.run_key,
+        engine: row.engine || "duckdb",
         target: row.target,
-        target_label: row.target_label,
+        target_label: labelEngineTarget(row.engine || "duckdb", row.target),
         size: row.size,
         phase,
         wall_ms: wallMs,
@@ -1153,6 +1338,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     function medianAttribution(entries) {
       return {
         target: entries[0].target,
+        engine: entries[0].engine,
         target_label: entries[0].target_label,
         size: entries[0].size,
         phase: entries[0].phase,
@@ -1166,8 +1352,9 @@ HTML_TEMPLATE = r"""<!doctype html>
     }
 
     function renderAttributionChart(rows) {
-      const perRun = [...groupBy(attributionRows(rows), entry => `${entry.target}|${entry.size}|${entry.run_key || ""}`).values()]
+      const perRun = [...groupBy(attributionRows(rows), entry => `${entry.engine}|${entry.target}|${entry.size}|${entry.run_key || ""}`).values()]
         .map(entries => ({
+          engine: entries[0].engine,
           target: entries[0].target,
           target_label: entries[0].target_label,
           size: entries[0].size,
@@ -1177,8 +1364,9 @@ HTML_TEMPLATE = r"""<!doctype html>
           other_http_ms: sum(entries.map(entry => entry.other_http_ms)),
           local_ms: sum(entries.map(entry => entry.local_ms))
         }));
-      const grouped = [...groupBy(perRun, entry => `${entry.target}|${entry.size}`).entries()]
+      const grouped = [...groupBy(perRun, entry => `${entry.engine}|${entry.target}|${entry.size}`).entries()]
         .map(([, entries]) => ({
+          engine: entries[0].engine,
           target: entries[0].target,
           target_label: entries[0].target_label,
           size: entries[0].size,
@@ -1224,7 +1412,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     }
 
     function renderAttributionTable(rows) {
-      const grouped = [...groupBy(attributionRows(rows), entry => `${entry.target}|${entry.size}|${entry.phase}`).values()]
+      const grouped = [...groupBy(attributionRows(rows), entry => `${entry.engine}|${entry.target}|${entry.size}|${entry.phase}`).values()]
         .map(entries => {
           const row = medianAttribution(entries);
           row.catalog_pct = row.wall_ms > 0 ? (row.catalog_ms / row.wall_ms) * 100 : NaN;
@@ -1246,9 +1434,9 @@ HTML_TEMPLATE = r"""<!doctype html>
       `).join("");
       document.getElementById("attributionTable").innerHTML = `
         <thead><tr>
-          <th>Target</th><th>Size</th><th>Phase</th><th class="num">Wall</th>
+          <th>Engine / Target</th><th>Size</th><th>Phase</th><th class="num">Wall</th>
           <th class="num">Catalog REST</th><th class="num">Object store</th>
-          <th class="num">Other HTTP</th><th class="num">DuckDB/local</th>
+          <th class="num">Other HTTP</th><th class="num">Engine/local</th>
           <th class="num">Catalog %</th>
         </tr></thead>
         <tbody>${body || "<tr><td colspan=\"9\">No attribution rows match current filters.</td></tr>"}</tbody>
@@ -1264,24 +1452,27 @@ HTML_TEMPLATE = r"""<!doctype html>
 
     function renderHeatmap(events) {
       const phases = dashboard.workload_phases;
-      const targets = dashboard.targets.filter(target => targetIsSelected(target));
+      const pairs = [...new Map(events.map(event => [
+        `${event.engine || "duckdb"}|${event.target}`,
+        { engine: event.engine || "duckdb", target: event.target }
+      ])).values()];
       const totals = new Map();
       for (const event of events) {
-        const key = `${event.target}|${event.normalized_phase}`;
+        const key = `${event.engine || "duckdb"}|${event.target}|${event.normalized_phase}`;
         totals.set(key, (totals.get(key) || 0) + Number(event.duration_ms || 0));
       }
       const maxValue = Math.max(...totals.values(), 0);
       const header = `
         <div class="heatmap-row">
-          <div class="heatmap-cell heatmap-head">Target</div>
+          <div class="heatmap-cell heatmap-head">Engine / Target</div>
           ${phases.map(phase => `<div class="heatmap-cell heatmap-head">${escapeHtml(labelPhase(phase))}</div>`).join("")}
         </div>
       `;
-      const rows = targets.map(target => `
+      const rows = pairs.map(pair => `
         <div class="heatmap-row">
-          <div class="heatmap-cell"><strong>${escapeHtml(labelTarget(target))}</strong></div>
+          <div class="heatmap-cell"><strong>${escapeHtml(labelEngineTarget(pair.engine, pair.target))}</strong></div>
           ${phases.map(phase => {
-            const value = totals.get(`${target}|${phase}`) || 0;
+            const value = totals.get(`${pair.engine}|${pair.target}|${phase}`) || 0;
             return `
               <div class="heatmap-cell" style="background:${heatColor(value, maxValue)}">
                 <div class="heatmap-value">${escapeHtml(fmtMs(value))}</div>
@@ -1301,6 +1492,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       const rows = top.map(event => `
         <tr>
           <td>${escapeHtml(event.target_label)}</td>
+          <td>${escapeHtml(labelEngine(event.engine || "duckdb"))}</td>
           <td>${escapeHtml(event.size)} r${escapeHtml(event.repetition)}</td>
           <td>${escapeHtml(labelPhase(event.normalized_phase))}</td>
           <td>${escapeHtml(labelGroup(event.url_group))}</td>
@@ -1313,18 +1505,19 @@ HTML_TEMPLATE = r"""<!doctype html>
       `).join("");
       document.getElementById("requestTable").innerHTML = `
         <thead><tr>
-          <th>Target</th><th>Run</th><th>Phase</th><th>Group</th><th>Method</th>
+          <th>Target</th><th>Engine</th><th>Run</th><th>Phase</th><th>Group</th><th>Method</th>
           <th>Status</th><th class="num">Duration</th><th>Path</th><th>Source</th>
         </tr></thead>
-        <tbody>${rows || "<tr><td colspan=\"9\">No requests match current filters.</td></tr>"}</tbody>
+        <tbody>${rows || "<tr><td colspan=\"10\">No requests match current filters.</td></tr>"}</tbody>
       `;
     }
 
     function renderStatusTable(events) {
-      const grouped = [...groupBy(events, event => `${event.target}|${event.method}|${event.status}|${event.url_group}`).entries()]
+      const grouped = [...groupBy(events, event => `${event.engine || "duckdb"}|${event.target}|${event.method}|${event.status}|${event.url_group}`).entries()]
         .map(([key, groupEvents]) => {
-          const [target, method, status, urlGroup] = key.split("|");
+          const [engine, target, method, status, urlGroup] = key.split("|");
           return {
+            engine,
             target,
             method,
             status,
@@ -1337,6 +1530,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       const rows = grouped.map(item => `
         <tr>
           <td>${escapeHtml(labelTarget(item.target))}</td>
+          <td>${escapeHtml(labelEngine(item.engine))}</td>
           <td>${escapeHtml(item.method)}</td>
           <td>${escapeHtml(item.status)}</td>
           <td>${escapeHtml(labelGroup(item.urlGroup))}</td>
@@ -1345,8 +1539,8 @@ HTML_TEMPLATE = r"""<!doctype html>
         </tr>
       `).join("");
       document.getElementById("statusTable").innerHTML = `
-        <thead><tr><th>Target</th><th>Method</th><th>Status</th><th>Group</th><th class="num">Requests</th><th class="num">Duration</th></tr></thead>
-        <tbody>${rows || "<tr><td colspan=\"6\">No status rows match current filters.</td></tr>"}</tbody>
+        <thead><tr><th>Target</th><th>Engine</th><th>Method</th><th>Status</th><th>Group</th><th class="num">Requests</th><th class="num">Duration</th></tr></thead>
+        <tbody>${rows || "<tr><td colspan=\"7\">No status rows match current filters.</td></tr>"}</tbody>
       `;
     }
 
@@ -1358,12 +1552,15 @@ HTML_TEMPLATE = r"""<!doctype html>
         return `
           <tr>
             <td>${escapeHtml(row.target_label)}</td>
+            <td>${escapeHtml(labelEngine(row.engine || "duckdb"))}</td>
+            <td>${escapeHtml(row.workload || "crud")}</td>
             <td>${escapeHtml(row.variant)}</td>
             <td>${escapeHtml(row.size)}</td>
             <td class="num">${escapeHtml(fmtNumber(Number(row.rows)))}</td>
             <td class="num">${escapeHtml(row.repetition)}</td>
             <td class="${row.passed ? "status-ok" : "status-bad"}">${row.passed ? "passed" : "failed"}</td>
             <td class="num">${escapeHtml(fmtSeconds(Number(row.workload_wall_s)))}</td>
+            <td class="num">${escapeHtml(fmtSeconds(Number(row.read_wall_s || 0)))}</td>
             <td class="num">${escapeHtml(fmtSeconds(Number(row.total_wall_s)))}</td>
             <td class="num">${escapeHtml(fmtMs(Number(row.http_duration_ms)))}</td>
             <td class="num">${escapeHtml(fmtNumber(Number(row.http_request_count)))}</td>
@@ -1373,11 +1570,11 @@ HTML_TEMPLATE = r"""<!doctype html>
       }).join("");
       document.getElementById("runTable").innerHTML = `
         <thead><tr>
-          <th>Target</th><th>Variant</th><th>Size</th><th class="num">Rows</th><th class="num">Rep</th>
-          <th>Result</th><th class="num">Workload</th><th class="num">Total</th>
+          <th>Target</th><th>Engine</th><th>Workload</th><th>Variant</th><th>Size</th><th class="num">Rows</th><th class="num">Rep</th>
+          <th>Result</th><th class="num">Workload</th><th class="num">Read</th><th class="num">Total</th>
           <th class="num">HTTP</th><th class="num">Requests</th><th>Artifacts</th>
         </tr></thead>
-        <tbody>${body || "<tr><td colspan=\"11\">No runs match current filters.</td></tr>"}</tbody>
+        <tbody>${body || "<tr><td colspan=\"14\">No runs match current filters.</td></tr>"}</tbody>
       `;
     }
 
@@ -1385,6 +1582,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       const query = state.query.trim().toLowerCase();
       const artifacts = dashboard.artifacts.filter(artifact => {
         if (artifact.target && !targetIsSelected(artifact.target)) return false;
+        if (state.engine !== "all" && artifact.engine && artifact.engine !== state.engine) return false;
         if (query && !artifact.path.toLowerCase().includes(query)) return false;
         return true;
       });
@@ -1392,13 +1590,14 @@ HTML_TEMPLATE = r"""<!doctype html>
         <tr>
           <td class="mono"><a href="${escapeHtml(artifact.href)}">${escapeHtml(artifact.path)}</a></td>
           <td>${escapeHtml(artifact.target)}</td>
+          <td>${escapeHtml(artifact.engine)}</td>
           <td>${escapeHtml(artifact.kind)}</td>
           <td class="num">${escapeHtml(artifact.size_label)}</td>
         </tr>
       `).join("");
       document.getElementById("artifactTable").innerHTML = `
-        <thead><tr><th>Path</th><th>Target</th><th>Kind</th><th class="num">Size</th></tr></thead>
-        <tbody>${rows || "<tr><td colspan=\"4\">No artifacts match current filters.</td></tr>"}</tbody>
+        <thead><tr><th>Path</th><th>Target</th><th>Engine dir</th><th>Kind</th><th class="num">Size</th></tr></thead>
+        <tbody>${rows || "<tr><td colspan=\"5\">No artifacts match current filters.</td></tr>"}</tbody>
       `;
     }
 
@@ -1406,6 +1605,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       const rows = filteredRows();
       const events = filteredEvents();
       renderStats(rows, events);
+      renderScaleLineChart(rows);
       renderComparison(rows);
       renderPhaseChart(rows);
       renderHttpGroupChart(events);

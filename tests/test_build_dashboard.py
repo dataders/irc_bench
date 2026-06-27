@@ -32,6 +32,7 @@ class BuildDashboardTest(unittest.TestCase):
             self.dashboard.normalize_phase("read_after_delete small rep 3"),
             "read_after_delete",
         )
+        self.assertEqual(self.dashboard.normalize_phase("tpch_q01 sf_0_1 rep 1"), "tpch_q01")
         self.assertEqual(self.dashboard.normalize_phase("attach"), "attach")
 
     def test_build_dashboard_data_embeds_rows_events_and_artifact_links(self):
@@ -46,6 +47,8 @@ class BuildDashboardTest(unittest.TestCase):
                     "variant": "default",
                     "size": "tiny",
                     "rows": 4,
+                    "workload": "crud",
+                    "artifact_stem": "lakekeeper_local_default_tiny_r1",
                     "repetition": 1,
                     "passed": True,
                     "exit_code": 0,
@@ -92,13 +95,50 @@ class BuildDashboardTest(unittest.TestCase):
         self.assertEqual(data["run_id"], "run-1")
         self.assertEqual(len(data["rows"]), 1)
         self.assertEqual(len(data["events"]), 1)
+        self.assertEqual(data["engines"], ["duckdb"])
         row = data["rows"][0]
+        self.assertEqual(row["engine"], "duckdb")
         self.assertEqual(row["workload_wall_s"], 0.09)
+        self.assertEqual(row["read_wall_s"], 0.04)
         self.assertEqual(row["support_wall_s"], 0.11)
         self.assertEqual(row["phase_timings"]["create_table"], 0.02)
         self.assertIn("sql", row["artifact_links"])
         self.assertEqual(data["events"][0]["normalized_phase"], "attach")
+        self.assertEqual(data["events"][0]["engine"], "duckdb")
         self.assertEqual(data["events"][0]["url_group"], "rest_config")
+
+    def test_build_dashboard_data_loads_nested_engine_summaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target_dir = root / "run-1" / "aws_glue" / "pyiceberg-create-write-read"
+            target_dir.mkdir(parents=True)
+            summary = [
+                {
+                    "engine": "pyiceberg",
+                    "target": "aws_glue",
+                    "size": "tiny",
+                    "rows": 4,
+                    "workload": "create-write-read",
+                    "repetition": 1,
+                    "passed": True,
+                    "error": "",
+                    "timings": {
+                        "create_table": 0.2,
+                        "append": 0.3,
+                        "scan": 0.4,
+                        "cleanup": 0.1,
+                    },
+                }
+            ]
+            (target_dir / "summary.json").write_text(json.dumps(summary))
+
+            output_path = root / "reports" / "run-1-dashboard.html"
+            data = self.dashboard.build_dashboard_data(root / "run-1", output_path)
+
+        self.assertEqual(len(data["rows"]), 1)
+        self.assertEqual(data["engines"], ["pyiceberg"])
+        self.assertEqual(data["rows"][0]["engine"], "pyiceberg")
+        self.assertEqual(data["rows"][0]["variant"], "default")
 
     def test_render_html_uses_multi_target_picker(self):
         data = {
@@ -109,11 +149,14 @@ class BuildDashboardTest(unittest.TestCase):
             "events": [],
             "artifacts": [],
             "targets": ["lakekeeper_local", "polaris_local"],
+            "engines": ["duckdb", "pyiceberg", "spark"],
             "sizes": ["tiny"],
             "variants": ["default"],
+            "workloads": ["crud"],
             "http_groups": [],
             "phase_order": list(self.dashboard.PHASE_ORDER),
             "workload_phases": list(self.dashboard.WORKLOAD_PHASES),
+            "read_phases": list(self.dashboard.READ_PHASES),
             "support_phases": list(self.dashboard.SUPPORT_PHASES),
             "target_labels": self.dashboard.TARGET_LABELS,
             "http_group_labels": self.dashboard.HTTP_GROUP_LABELS,
@@ -123,9 +166,18 @@ class BuildDashboardTest(unittest.TestCase):
 
         self.assertIn('id="targetPicker"', html)
         self.assertIn('id="targetPickerMenu"', html)
+        self.assertIn('id="engineFilter"', html)
         self.assertIn('id="attributionChart"', html)
         self.assertIn('id="attributionTable"', html)
+        self.assertIn('id="workloadFilter"', html)
+        self.assertIn("Read wall", html)
+        self.assertIn('id="scaleLineChart"', html)
+        self.assertIn("Performance By Table Size", html)
+        self.assertIn("renderScaleLineChart", html)
+        self.assertIn("const right = 170;", html)
         self.assertIn("state.targets", html)
+        self.assertIn('["engineFilter", "engine"]', html)
+        self.assertIn("labelEngineTarget", html)
         self.assertNotIn('id="targetFilter"', html)
 
 

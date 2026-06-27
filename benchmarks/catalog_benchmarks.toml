@@ -76,3 +76,36 @@ required_env = ["HORIZON_ENDPOINT", "HORIZON_WAREHOUSE", "HORIZON_ACCESS_TOKEN",
 [targets.horizon.token_secret]
 name = "snowflake_oauth"
 token = "${HORIZON_ACCESS_TOKEN}"
+
+[targets.aws_glue]
+description = "AWS Glue Iceberg REST catalog backed by a general purpose S3 bucket."
+default_variant = "no_stage_no_purge"
+attach_as = "aws_glue"
+warehouse = "${AWS_GLUE_REST_ACCOUNT_ID}"
+endpoint_type = "glue"
+default_schema = "${AWS_GLUE_REST_SCHEMA:-irc_duckdb_bench}"
+access_delegation_mode = "NONE"
+default_region = "${AWS_GLUE_REST_REGION:-us-west-2}"
+create_schema = false
+table_location_root = "${AWS_GLUE_REST_TABLE_LOCATION_ROOT}"
+required_env = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_GLUE_REST_ACCOUNT_ID", "AWS_GLUE_REST_TABLE_LOCATION_ROOT"]
+
+[targets.aws_glue.aws_secret]
+name = "aws_sigv4"
+region = "${AWS_GLUE_REST_REGION:-us-west-2}"
+
+[targets.aws_s3_tables]
+description = "Amazon S3 Tables Iceberg REST endpoint."
+default_variant = "no_stage_create"
+attach_as = "aws_s3_tables"
+warehouse = "${AWS_S3_TABLES_BUCKET_ARN}"
+endpoint_type = "s3_tables"
+default_schema = "${AWS_S3_TABLES_NAMESPACE:-irc_duckdb_bench}"
+access_delegation_mode = "NONE"
+default_region = "${AWS_S3_TABLES_REGION:-us-west-2}"
+create_schema = true
+required_env = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_S3_TABLES_BUCKET_ARN"]
+
+[targets.aws_s3_tables.aws_secret]
+name = "aws_sigv4"
+region = "${AWS_S3_TABLES_REGION:-us-west-2}"

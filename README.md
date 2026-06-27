@@ -47,6 +47,24 @@ scripts/stop_local_polaris.sh
 Detailed target setup and output descriptions are in
 [`docs/catalog-benchmarks.md`](docs/catalog-benchmarks.md).
 
+Run the same REST catalog create/write/read path through PyIceberg instead of DuckDB:
+
+```bash
+uv run scripts/pyiceberg_create_table_benchmark.py --target lakekeeper_local --sizes tiny --repetitions 3
+```
+
+Run a larger CRUD scaling sweep:
+
+```bash
+uv run scripts/catalog_benchmark.py --target horizon --locked-config --sizes tiny,small,medium,large --repetitions 3
+```
+
+Run read-focused TPC-H scaling:
+
+```bash
+uv run scripts/catalog_benchmark.py --target horizon --locked-config --workload tpch-read --scale-factors 0.01,0.1,1 --repetitions 3
+```
+
 Build a static dashboard for the newest benchmark run:
 
 ```bash

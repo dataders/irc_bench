@@ -153,6 +153,52 @@ Run:
 uv run scripts/catalog_benchmark.py --target horizon --sizes tiny,small,medium --repetitions 3
 ```
 
+## AWS Glue
+
+The AWS Glue Iceberg REST endpoint uses SigV4 auth with the AWS credential
+chain. The benchmark creates tables with explicit `location` properties because
+Glue-backed S3 object storage tables need a table location on create.
+
+Required env vars:
+
+```bash
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_SESSION_TOKEN=... # when using temporary credentials
+AWS_GLUE_REST_REGION=us-west-2
+AWS_GLUE_REST_ACCOUNT_ID=123456789012
+AWS_GLUE_REST_SCHEMA=irc_duckdb_bench
+AWS_GLUE_REST_TABLE_LOCATION_ROOT=s3://bucket/prefix
+```
+
+Run the original CRUD write benchmark:
+
+```bash
+uv run scripts/catalog_benchmark.py --target aws_glue --locked-config --sizes tiny
+```
+
+## Amazon S3 Tables
+
+The S3 Tables Iceberg REST endpoint uses SigV4 auth with the S3 table bucket ARN
+as the warehouse.
+
+Required env vars:
+
+```bash
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_SESSION_TOKEN=... # when using temporary credentials
+AWS_S3_TABLES_REGION=us-west-2
+AWS_S3_TABLES_BUCKET_ARN=arn:aws:s3tables:us-west-2:123456789012:bucket/bucket-name
+AWS_S3_TABLES_NAMESPACE=irc_duckdb_bench
+```
+
+Run the original CRUD write benchmark:
+
+```bash
+uv run scripts/catalog_benchmark.py --target aws_s3_tables --locked-config --sizes tiny
+```
+
 `scripts/configure_horizon_schema.sh` and `scripts/doctor.sh` are optional
 Snowflake SQL API helpers. They need the `SNOWFLAKE_*` variables documented in
 `.env.example`.
@@ -204,6 +250,86 @@ configuration across the requested sizes:
 uv run scripts/catalog_benchmark.py --target horizon --locked-config --sizes tiny,small,medium
 ```
 
+For the full CRUD scaling sweep, include the larger named sizes:
+
+```bash
+uv run scripts/catalog_benchmark.py \
+  --target horizon \
+  --locked-config \
+  --sizes tiny,small,medium,large \
+  --repetitions 3
+```
+
+## Read Workload
+
+Use the TPC-H read workload when the goal is read performance as data grows.
+TPC-H and TPC-DS are separate benchmark suites; this harness starts with TPC-H
+because it gives a smaller, repeatable analytic read surface that is practical
+across local and remote catalogs. TPC-DS is broader and useful later, but it has
+many more tables and queries and is a larger expansion of the harness.
+
+The TPC-H read workload:
+
+- generates local TPC-H data with DuckDB `dbgen`
+- materializes `lineitem`, `orders`, and `customer` into the attached Iceberg
+  catalog
+- runs TPC-H-style read phases `tpch_q01`, `tpch_q03`, and `tpch_q06`
+- records read-only wall time separately as `read_wall_s` in the dashboard
+
+Run a scaling sweep:
+
+```bash
+uv run scripts/catalog_benchmark.py \
+  --target horizon \
+  --locked-config \
+  --workload tpch-read \
+  --scale-factors 0.01,0.1,1 \
+  --repetitions 3
+```
+
+The `rows` value in summaries for `tpch-read` estimates `lineitem` rows from the
+TPC-H scale factor, so the report can order results by growing table size.
+
+## PyIceberg Create-Write-Read Benchmark
+
+Use `scripts/pyiceberg_create_table_benchmark.py` when the goal is to measure
+the same REST catalog create/write/read path without DuckDB in the loop. The
+runner reuses `benchmarks/catalog_benchmarks.toml` target definitions and
+records these phases:
+
+- load the PyIceberg REST catalog
+- create the namespace when the target allows it
+- drop any leftover table with the benchmark name
+- create the Iceberg table
+- load the created table back through the catalog
+- append generated Arrow data
+- scan the table back and validate row count plus id sum
+- drop the table unless `--keep-tables` is set
+
+Run the local Lakekeeper path:
+
+```bash
+docker compose up -d
+direnv exec . uv run scripts/pyiceberg_create_table_benchmark.py \
+  --target lakekeeper_local \
+  --sizes tiny \
+  --repetitions 3
+```
+
+Outputs land under:
+
+```text
+.tmp/catalog_benchmarks/<run-id>/<target>/pyiceberg-create-write-read/
+```
+
+`summary.json` keeps per-repetition phase timings. `summary.csv` flattens those
+timings to one row per phase.
+
+Single-node Spark is not wired into this repo yet. Java 17 is enough for a local
+Spark process, but a Spark runner still needs a PySpark dependency, Iceberg Spark
+runtime package coordinates, and Spark catalog/FileIO properties separate from
+PyIceberg's configuration.
+
 Run only the compatibility matrix:
 
 ```bash
@@ -253,6 +379,15 @@ The workload phases are:
 - read back row-count checks
 - delete even ids with `DELETE FROM ... WHERE id % 2 = 0`
 - read back post-delete verification
+- drop table cleanup
+
+For `--workload tpch-read`, workload phases are:
+
+- generate local TPC-H data
+- load TPC-H tables into the attached catalog
+- TPC-H query 1 style lineitem aggregate
+- TPC-H query 3 style customer/orders/lineitem join
+- TPC-H query 6 style lineitem revenue filter
 - drop table cleanup
 
 ## Python Quality Gates
