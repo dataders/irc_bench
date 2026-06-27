@@ -18,7 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 REPORTS_DIR = ROOT / "reports"
 DEFAULT_PARQUET = REPORTS_DIR / "engine-matrix-all-20260626.parquet"
 DEFAULT_CSV = REPORTS_DIR / "engine-matrix-all-20260626.csv"
-DEFAULT_MARKDOWN = REPORTS_DIR / "engine-matrix-all-20260626-mviz.md"
+DEFAULT_MVIZ_SOURCE = REPORTS_DIR / "engine-matrix-all-20260626.mviz"
+DEFAULT_GITHUB_MARKDOWN = REPORTS_DIR / "engine-matrix-all-20260626-github.md"
 DEFAULT_HTML = REPORTS_DIR / "engine-matrix-all-20260626-mviz.html"
 DEFAULT_DATA_DIR = REPORTS_DIR / "mviz-data" / "engine-matrix-all-20260626"
 
@@ -454,6 +455,214 @@ def write_flat_csv(rows: list[dict[str, Any]], csv_path: Path) -> None:
     write_csv(csv_path, rows, columns)
 
 
+def fmt_seconds(value: Any) -> str:
+    return f"{float(value or 0):.3f}s"
+
+
+def fmt_ratio(value: Any) -> str:
+    return f"{float(value or 0):.2f}x"
+
+
+def markdown_table(headers: list[str], rows: list[list[Any]]) -> str:
+    output = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join("---" for _ in headers) + " |",
+    ]
+    for row in rows:
+        output.append("| " + " | ".join(str(value) for value in row) + " |")
+    return "\n".join(output)
+
+
+def operation_by_catalog_rows(rows: list[dict[str, Any]]) -> list[list[Any]]:
+    output = []
+    for size in SIZE_ORDER:
+        for catalog in CATALOG_ORDER:
+            values = {
+                row["engine"]: row["operation_s"]
+                for row in rows
+                if row["size"] == size and row["catalog"] == catalog
+            }
+            if not values:
+                continue
+            output.append(
+                [
+                    size,
+                    CATALOG_LABELS[catalog],
+                    fmt_seconds(values.get("duckdb")),
+                    fmt_seconds(values.get("pyiceberg")),
+                    fmt_seconds(values.get("spark")),
+                ]
+            )
+    return output
+
+
+def operation_by_engine_rows(rows: list[dict[str, Any]]) -> list[list[Any]]:
+    output = []
+    for size in SIZE_ORDER:
+        for engine in ENGINE_ORDER:
+            values = {
+                row["catalog"]: row["operation_s"]
+                for row in rows
+                if row["size"] == size and row["engine"] == engine
+            }
+            if not values:
+                continue
+            output.append(
+                [
+                    size,
+                    ENGINE_LABELS[engine],
+                    fmt_seconds(values.get("aws_glue")),
+                    fmt_seconds(values.get("aws_s3_tables")),
+                    fmt_seconds(values.get("horizon")),
+                    fmt_seconds(values.get("polaris_remote")),
+                ]
+            )
+    return output
+
+
+def fastest_rows(rows: list[dict[str, Any]]) -> list[list[Any]]:
+    output = []
+    for size in SIZE_ORDER:
+        for catalog in CATALOG_ORDER:
+            entries = [row for row in rows if row["size"] == size and row["catalog"] == catalog]
+            if not entries:
+                continue
+            best = min(entries, key=lambda row: row["operation_s"])
+            worst = max(entries, key=lambda row: row["operation_s"])
+            spread = worst["operation_s"] / best["operation_s"] if best["operation_s"] else 0
+            output.append(
+                [
+                    size,
+                    CATALOG_LABELS[catalog],
+                    f"{ENGINE_LABELS[best['engine']]} {fmt_seconds(best['operation_s'])}",
+                    f"{ENGINE_LABELS[worst['engine']]} {fmt_seconds(worst['operation_s'])}",
+                    fmt_ratio(spread),
+                ]
+            )
+    return output
+
+
+def write_github_markdown(
+    rows: list[dict[str, Any]],
+    *,
+    markdown_path: Path,
+    parquet_path: Path,
+    csv_path: Path,
+    html_path: Path,
+    mviz_source_path: Path,
+    data_dir: Path,
+) -> None:
+    markdown_path.parent.mkdir(parents=True, exist_ok=True)
+    remote_rows = remote_table_rows(rows)
+    http_rows = http_table_rows(rows)
+    lines = [
+        "# DuckDB Iceberg Engine Matrix",
+        "",
+        (
+            "GitHub-native summary of the combined engine matrix report. Charts live in "
+            f"[the generated HTML]({relpath(html_path, markdown_path.parent)}); mviz "
+            f"source is in [`{relpath(mviz_source_path, ROOT)}`]"
+            f"({relpath(mviz_source_path, markdown_path.parent)})."
+        ),
+        "",
+        (
+            "DuckDB uses the CRUD workload. PyIceberg and Spark use create-write-read. "
+            "`operation_s` excludes engine startup/setup where possible, but DuckDB still "
+            "includes delete and read-after-delete work."
+        ),
+        "",
+        "## Source Files",
+        "",
+        markdown_table(
+            ["Artifact", "Path"],
+            [
+                ["Parquet input", f"`{relpath(parquet_path, ROOT)}`"],
+                ["Flat CSV export", f"`{relpath(csv_path, ROOT)}`"],
+                ["mviz source", f"`{relpath(mviz_source_path, ROOT)}`"],
+                ["Rendered HTML", f"`{relpath(html_path, ROOT)}`"],
+                ["Generated mviz data", f"`{relpath(data_dir, ROOT)}`"],
+            ],
+        ),
+        "",
+        "## Fastest Operation By Size And Catalog",
+        "",
+        markdown_table(["Size", "Catalog", "Fastest", "Slowest", "Spread"], fastest_rows(rows)),
+        "",
+        "## Operation Seconds By Catalog",
+        "",
+        markdown_table(
+            ["Size", "Catalog", "DuckDB", "PyIceberg", "Spark"],
+            operation_by_catalog_rows(rows),
+        ),
+        "",
+        "## Operation Seconds By Query Engine",
+        "",
+        markdown_table(
+            [
+                "Size",
+                "Engine",
+                "AWS Glue",
+                "AWS S3 Tables",
+                "Snowflake Horizon",
+                "Polaris remote",
+            ],
+            operation_by_engine_rows(rows),
+        ),
+        "",
+        "## DuckDB HTTP Timings",
+        "",
+        (
+            "HTTP debug timings are populated for DuckDB CLI rows only. `Summed HTTP` is "
+            "summed request duration, not wall time."
+        ),
+        "",
+        markdown_table(
+            ["Size", "Catalog", "Total", "Operation", "Summed HTTP", "Requests"],
+            [
+                [
+                    row["size"],
+                    row["catalog"],
+                    fmt_seconds(row["total_s"]),
+                    fmt_seconds(row["operation_s"]),
+                    fmt_seconds(row["http_s"]),
+                    row["http_requests"],
+                ]
+                for row in http_rows
+            ],
+        ),
+        "",
+        "## Remote Catalog Comparison",
+        "",
+        markdown_table(
+            [
+                "Size",
+                "Engine",
+                "Fastest",
+                "Polaris remote",
+                "Snowflake Horizon",
+                "AWS S3 Tables",
+                "Horizon / Polaris",
+                "S3 Tables / Polaris",
+            ],
+            [
+                [
+                    row["size"],
+                    row["engine"],
+                    row["fastest"],
+                    fmt_seconds(row["polaris_remote_s"]),
+                    fmt_seconds(row["horizon_s"]),
+                    fmt_seconds(row["aws_s3_tables_s"]),
+                    fmt_ratio(row["horizon_vs_polaris"]),
+                    fmt_ratio(row["s3_tables_vs_polaris"]),
+                ]
+                for row in remote_rows
+            ],
+        ),
+        "",
+    ]
+    markdown_path.write_text("\n".join(lines))
+
+
 def write_note(data_dir: Path) -> Path:
     path = data_dir / "notes" / "comparison-note.json"
     write_json(
@@ -522,9 +731,9 @@ def block(
     return f"{head}\n{json.dumps(options, sort_keys=True)}\n```"
 
 
-def write_markdown(
+def write_mviz_source(
     *,
-    markdown_path: Path,
+    mviz_source_path: Path,
     parquet_path: Path,
     csv_path: Path,
     data_dir: Path,
@@ -538,7 +747,7 @@ def write_markdown(
     remote_charts: list[MvizRef],
     remote_table_ref: MvizRef,
 ) -> None:
-    markdown_path.parent.mkdir(parents=True, exist_ok=True)
+    mviz_source_path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         "---",
         "title: DuckDB Iceberg Engine Matrix",
@@ -546,38 +755,38 @@ def write_markdown(
         "continuous: true",
         "---",
         "",
-        block("big_value", kpis[0], markdown_path, "[4,2]"),
-        block("big_value", kpis[1], markdown_path, "[4,2]"),
-        block("big_value", kpis[2], markdown_path, "[4,2]"),
-        block("big_value", kpis[3], markdown_path, "[4,2]"),
+        block("big_value", kpis[0], mviz_source_path, "[4,2]"),
+        block("big_value", kpis[1], mviz_source_path, "[4,2]"),
+        block("big_value", kpis[2], mviz_source_path, "[4,2]"),
+        block("big_value", kpis[3], mviz_source_path, "[4,2]"),
         "",
-        block("note", note, markdown_path, "[16,2]"),
+        block("note", note, mviz_source_path, "[16,2]"),
         "",
-        block("textarea", sections["catalog"], markdown_path, "[16,2]"),
+        block("textarea", sections["catalog"], mviz_source_path, "[16,2]"),
         "",
     ]
 
     for path, options in catalog_charts:
-        lines.append(block("line", path, markdown_path, "[16,8]", options))
+        lines.append(block("line", path, mviz_source_path, "[16,8]", options))
         lines.append("")
 
     lines.extend(
         [
-            block("textarea", sections["engine"], markdown_path, "[16,2]"),
+            block("textarea", sections["engine"], mviz_source_path, "[16,2]"),
             "",
         ]
     )
     for path, options in engine_charts:
-        lines.append(block("line", path, markdown_path, "[16,8]", options))
+        lines.append(block("line", path, mviz_source_path, "[16,8]", options))
         lines.append("")
 
     lines.extend(
         [
-            block("textarea", sections["http"], markdown_path, "[16,2]"),
+            block("textarea", sections["http"], mviz_source_path, "[16,2]"),
             "",
-            block("line", http_chart[0], markdown_path, "[16,8]", http_chart[1]),
+            block("line", http_chart[0], mviz_source_path, "[16,8]", http_chart[1]),
             "",
-            block("table", http_table_ref[0], markdown_path, "[16,7]", http_table_ref[1]),
+            block("table", http_table_ref[0], mviz_source_path, "[16,7]", http_table_ref[1]),
             "",
         ]
     )
@@ -586,15 +795,15 @@ def write_markdown(
         [
             "---",
             "",
-            block("textarea", sections["remote"], markdown_path, "[16,2]"),
+            block("textarea", sections["remote"], mviz_source_path, "[16,2]"),
             "",
         ]
     )
     for path, options in remote_charts:
-        lines.append(block("line", path, markdown_path, "[16,8]", options))
+        lines.append(block("line", path, mviz_source_path, "[16,8]", options))
         lines.append("")
     table_path, table_options = remote_table_ref
-    lines.append(block("table", table_path, markdown_path, "[16,7]", table_options))
+    lines.append(block("table", table_path, mviz_source_path, "[16,7]", table_options))
     lines.extend(
         [
             "",
@@ -606,13 +815,13 @@ def write_markdown(
             "",
         ]
     )
-    markdown_path.write_text("\n".join(lines))
+    mviz_source_path.write_text("\n".join(lines))
 
 
-def render_html(markdown_path: Path, html_path: Path) -> None:
+def render_html(mviz_source_path: Path, html_path: Path) -> None:
     html_path.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
-        ["npx", "-y", "-q", "mviz", str(markdown_path), "-o", str(html_path)],
+        ["npx", "-y", "-q", "mviz", str(mviz_source_path), "-o", str(html_path)],
         check=True,
         cwd=ROOT,
     )
@@ -624,7 +833,8 @@ def render_html(markdown_path: Path, html_path: Path) -> None:
 def build(
     parquet_path: Path,
     csv_path: Path,
-    markdown_path: Path,
+    mviz_source_path: Path,
+    github_markdown_path: Path,
     html_path: Path,
     data_dir: Path,
     render: bool,
@@ -641,8 +851,8 @@ def build(
     http_table_ref = write_http_table(rows, data_dir)
     remote_charts = build_remote_charts(rows, data_dir)
     remote_table_ref = write_remote_table(rows, data_dir)
-    write_markdown(
-        markdown_path=markdown_path,
+    write_mviz_source(
+        mviz_source_path=mviz_source_path,
         parquet_path=parquet_path,
         csv_path=csv_path,
         data_dir=data_dir,
@@ -656,15 +866,25 @@ def build(
         remote_charts=remote_charts,
         remote_table_ref=remote_table_ref,
     )
+    write_github_markdown(
+        rows,
+        markdown_path=github_markdown_path,
+        parquet_path=parquet_path,
+        csv_path=csv_path,
+        html_path=html_path,
+        mviz_source_path=mviz_source_path,
+        data_dir=data_dir,
+    )
     if render:
-        render_html(markdown_path, html_path)
+        render_html(mviz_source_path, html_path)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--parquet", type=Path, default=DEFAULT_PARQUET)
     parser.add_argument("--csv", type=Path, default=DEFAULT_CSV)
-    parser.add_argument("--markdown", type=Path, default=DEFAULT_MARKDOWN)
+    parser.add_argument("--mviz-source", type=Path, default=DEFAULT_MVIZ_SOURCE)
+    parser.add_argument("--github-markdown", type=Path, default=DEFAULT_GITHUB_MARKDOWN)
     parser.add_argument("--html", type=Path, default=DEFAULT_HTML)
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--no-render", action="store_true", help="write mviz spec only")
@@ -676,7 +896,8 @@ def main(argv: list[str] | None = None) -> int:
     build(
         parquet_path=args.parquet,
         csv_path=args.csv,
-        markdown_path=args.markdown,
+        mviz_source_path=args.mviz_source,
+        github_markdown_path=args.github_markdown,
         html_path=args.html,
         data_dir=args.data_dir,
         render=not args.no_render,

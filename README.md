@@ -71,8 +71,8 @@ Build a static dashboard for the newest benchmark run:
 uv run scripts/build_dashboard.py
 ```
 
-Build the flat CSV export and mviz report from the combined engine matrix
-Parquet file:
+Build the flat CSV export, GitHub-readable markdown report, and mviz HTML from
+the combined engine matrix Parquet file:
 
 ```bash
 uv run scripts/build_mviz_report.py

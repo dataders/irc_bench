@@ -34,7 +34,8 @@ class BuildMvizReportTest(unittest.TestCase):
             root = Path(tmp)
             parquet_path = root / "results.parquet"
             csv_path = root / "results.csv"
-            markdown_path = root / "report.md"
+            mviz_source_path = root / "report.mviz"
+            github_markdown_path = root / "report.md"
             html_path = root / "report.html"
             data_dir = root / "data"
             rows = []
@@ -70,13 +71,15 @@ class BuildMvizReportTest(unittest.TestCase):
             self.report.build(
                 parquet_path=parquet_path,
                 csv_path=csv_path,
-                markdown_path=markdown_path,
+                mviz_source_path=mviz_source_path,
+                github_markdown_path=github_markdown_path,
                 html_path=html_path,
                 data_dir=data_dir,
                 render=False,
             )
 
-            markdown = markdown_path.read_text()
+            mviz_source = mviz_source_path.read_text()
+            github_markdown = github_markdown_path.read_text()
             catalog_section = json.loads((data_dir / "sections" / "catalog.json").read_text())
             engine_section = json.loads((data_dir / "sections" / "engine.json").read_text())
             http_section = json.loads((data_dir / "sections" / "http.json").read_text())
@@ -89,11 +92,17 @@ class BuildMvizReportTest(unittest.TestCase):
         self.assertIn("Performance Across Data Sizes By Query Engine", engine_section["content"])
         self.assertIn("DuckDB HTTP Timings", http_section["content"])
         self.assertIn("Remote Catalog Comparison", remote_section["content"])
-        self.assertIn("file=data/by-catalog/aws-glue.csv", markdown)
-        self.assertIn("file=data/by-engine/duckdb.csv", markdown)
-        self.assertIn("file=data/http/duckdb-http-table.csv", markdown)
-        self.assertIn("file=data/remote-comparison/remote-catalog-table.csv", markdown)
-        self.assertIn("line size=[16,8]", markdown)
+        self.assertIn("file=data/by-catalog/aws-glue.csv", mviz_source)
+        self.assertIn("file=data/by-engine/duckdb.csv", mviz_source)
+        self.assertIn("file=data/http/duckdb-http-table.csv", mviz_source)
+        self.assertIn("file=data/remote-comparison/remote-catalog-table.csv", mviz_source)
+        self.assertIn("line size=[16,8]", mviz_source)
+        self.assertIn("## DuckDB HTTP Timings", github_markdown)
+        self.assertIn("| Size | Catalog | DuckDB | PyIceberg | Spark |", github_markdown)
+        self.assertIn(
+            "| Size | Catalog | Total | Operation | Summed HTTP | Requests |", github_markdown
+        )
+        self.assertNotIn("```line", github_markdown)
         self.assertTrue(csv_exists)
         self.assertEqual(http_rows[0]["http_s"], "1.0")
         self.assertFalse(html_path.exists())
